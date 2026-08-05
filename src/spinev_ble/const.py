@@ -100,15 +100,34 @@ class Register(IntEnum):
     """UTC offset, packed as ``00 00 HH MM``."""
     POWER = 0x84
     """Active power, in watts, as a float."""
+    GRID_CURRENT_LIMIT = 0x99
+    """Current the grid supply can deliver, in amps, as a float.
+
+    Load balancing holds the whole installation under this figure, so it
+    describes the supply feeding the charger rather than the charger itself.
+    """
+    LOAD_BALANCING_ENABLED = 0x9A
+    """Whether load balancing is active, 1 enabled, 0 disabled."""
+    SAFE_CURRENT_OFFSET = 0x9C
+    """Headroom kept below :attr:`GRID_CURRENT_LIMIT`, in amps."""
+    REDUCE_CURRENT_OFFSET = 0x9D
+    """Step by which charging current is cut when the grid limit is neared, in
+    amps."""
+    LOAD_BALANCING_SOURCE = 0xBD
+    """Where load balancing reads grid load from, as a small enum."""
     RANDOM_DELAY = 0xC2
     """Delay before charging starts, in seconds, 0 to 1800, 0 disables it."""
+    MAX_GRID_POWER = 0xD1
+    """Ceiling on total grid power for the installation, as a float."""
+    LOAD_BALANCING_PRIORITY = 0xD2
+    """Priority mode used when several chargers share one supply."""
 
 
 class ChargerState(IntEnum):
     """Values reported by :attr:`Register.STATE`.
 
-    Values above 6 exist but have no confirmed meaning, so they are not named.
-    Reading one through :meth:`SpinEvCharger.async_get_state` raises
+    A charger may report a value outside this set. Reading one through
+    :meth:`SpinEvCharger.async_get_state` raises
     :class:`~spinev_ble.exceptions.SpinEvProtocolError`; use
     :meth:`SpinEvCharger.async_get_state_value` for the raw number instead.
     """
@@ -125,6 +144,24 @@ class ChargerState(IntEnum):
     """a protection alarm has tripped; see :meth:`SpinEvCharger.async_get_alarms`"""
     FINISHING = 6
     """wrapping up after charging stops, before returning to available or idle"""
+    EVSE_SUSPENDED = 7
+    """the charger is holding off, with the session still open"""
+    EV_SUSPENDED = 8
+    """the vehicle has stopped drawing, with the session still open
+
+    Power falls to roughly zero while the session timer keeps running and the
+    energy total stops climbing. Charging resumes on its own, with no new start
+    command, so this is an ordinary part of a session rather than a failure.
+    """
+    BOOTING = 9
+    """starting up, and not yet answering commands
+
+    Control commands sent now are refused. The charger passes through this
+    after a restart, including the one applying a configuration change
+    triggers.
+    """
+    UNAVAILABLE = 10
+    """not offering charging at all"""
 
     @property
     def is_charging(self) -> bool:
@@ -132,9 +169,22 @@ class ChargerState(IntEnum):
         return self in (ChargerState.STARTING, ChargerState.CHARGING)
 
     @property
+    def is_suspended(self) -> bool:
+        """True while a session is open but paused, by either end."""
+        return self in (ChargerState.EVSE_SUSPENDED, ChargerState.EV_SUSPENDED)
+
+    @property
     def has_vehicle(self) -> bool:
-        """True when a vehicle is connected."""
-        return self is not ChargerState.AVAILABLE
+        """True when a vehicle is connected.
+
+        False whenever the charger is not in a position to say, which covers
+        :attr:`BOOTING` and :attr:`UNAVAILABLE` as well as :attr:`AVAILABLE`.
+        """
+        return self not in (
+            ChargerState.AVAILABLE,
+            ChargerState.BOOTING,
+            ChargerState.UNAVAILABLE,
+        )
 
     @property
     def is_fault(self) -> bool:
@@ -170,6 +220,11 @@ MAX_RANDOM_DELAY_S = 1800
 
 COMMIT_VALUE = 0x01000000
 """Value written to :attr:`Register.COMMIT` to apply pending configuration."""
+
+CONTROL_REJECTED = 0xFFFFFFFF
+"""Value the charger echoes back from :attr:`Register.CONTROL` when it refuses
+a start or stop command. An accepted command is echoed back unchanged instead,
+so a reply carrying this value means the charger did nothing."""
 
 ENERGY_SCALE = 0.01
 """kWh per count. Energy registers are in hundredths of a kWh."""

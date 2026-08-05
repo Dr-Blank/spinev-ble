@@ -293,3 +293,24 @@ class TestConfigWrites:
 
     def test_commit_frame(self) -> None:
         assert build_commit().hex() == "10ac3b0101000000"
+
+
+class TestChargerStateCoverage:
+    """The state set the charger actually reports."""
+
+    def test_every_reported_state_has_a_name(self) -> None:
+        # A session walks through these, so none of them may raise.
+        for value in range(1, 11):
+            assert ChargerState(value).name
+
+    def test_suspended_states_keep_the_session_open(self) -> None:
+        for state in (ChargerState.EVSE_SUSPENDED, ChargerState.EV_SUSPENDED):
+            assert state.is_suspended
+            assert state.has_vehicle
+            assert not state.is_charging
+
+    def test_booting_does_not_claim_a_vehicle_is_present(self) -> None:
+        # The charger cannot report a vehicle while it is still starting up.
+        assert not ChargerState.BOOTING.has_vehicle
+        assert not ChargerState.UNAVAILABLE.has_vehicle
+        assert not ChargerState.BOOTING.is_charging

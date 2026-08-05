@@ -23,6 +23,7 @@ from datetime import datetime
 
 from .const import (
     COMMIT_VALUE,
+    CONTROL_REJECTED,
     ENERGY_SCALE,
     EVENT_RECORD_LENGTH,
     FRAME_HEADER,
@@ -35,7 +36,11 @@ from .const import (
     Operation,
     Register,
 )
-from .exceptions import SpinEvPasswordError, SpinEvProtocolError
+from .exceptions import (
+    SpinEvCommandRejectedError,
+    SpinEvPasswordError,
+    SpinEvProtocolError,
+)
 from .models import ChargingSession, Frame
 
 VALUE_LENGTH = 4
@@ -185,6 +190,32 @@ def build_control(command: Command, password: int) -> bytes:
     _check_password(password)
     value = (int(command) << 24) | password
     return build_write_uint(Register.CONTROL, value)
+
+
+def check_control_reply(sent: bytes, reply: bytes) -> None:
+    """Confirm the charger accepted a start or stop command.
+
+    A charger that acts on a control command echoes it back byte for byte. One
+    that refuses replies on the same register with
+    :data:`~spinev_ble.const.CONTROL_REJECTED` instead, so a reply arriving is
+    not on its own proof that anything happened.
+
+    :param sent: the frame built by :func:`build_control`.
+    :param reply: the payload the charger answered with.
+    :raises SpinEvCommandRejectedError: if the charger refused the command.
+    :raises SpinEvProtocolError: if the reply is not a control reply at all.
+    """
+    frame = parse_frame(reply)
+    if frame is None or frame.register != Register.CONTROL:
+        raise SpinEvProtocolError("reply is not a control reply")
+    if frame.raw == struct.pack(">I", CONTROL_REJECTED):
+        raise SpinEvCommandRejectedError(
+            "the charger refused the command. The Bluetooth password is probably wrong."
+        )
+    if frame.raw != sent[VALUE_OFFSET:]:
+        raise SpinEvProtocolError(
+            "the charger answered a control command with a different command"
+        )
 
 
 def parse_frame(data: bytes) -> Frame | None:

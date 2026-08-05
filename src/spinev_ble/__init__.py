@@ -37,6 +37,8 @@ from .const import (
     Register,
 )
 from .exceptions import (
+    SpinEvBusyError,
+    SpinEvCommandRejectedError,
     SpinEvConnectionError,
     SpinEvError,
     SpinEvPasswordError,
@@ -44,7 +46,13 @@ from .exceptions import (
     SpinEvTimeoutError,
     SpinEvValueError,
 )
-from .models import ChargerStatus, ChargingSession, Frame, OcppConfig
+from .models import (
+    ChargerStatus,
+    ChargingSession,
+    Frame,
+    LoadBalancingConfig,
+    OcppConfig,
+)
 from .protocol import (
     ALARM_BITS,
     build_clock_date,
@@ -56,6 +64,7 @@ from .protocol import (
     build_timezone,
     build_write_float,
     build_write_uint,
+    check_control_reply,
     decode_alarms,
     decode_energy,
     decode_firmware_version,
@@ -92,10 +101,13 @@ __all__ = [
     "ChargingSession",
     "Command",
     "Frame",
+    "LoadBalancingConfig",
     "OcppConfig",
     "Operation",
     "Register",
+    "SpinEvBusyError",
     "SpinEvCharger",
+    "SpinEvCommandRejectedError",
     "SpinEvConnectionError",
     "SpinEvError",
     "SpinEvPasswordError",
@@ -112,6 +124,7 @@ __all__ = [
     "build_timezone",
     "build_write_float",
     "build_write_uint",
+    "check_control_reply",
     "decode_alarms",
     "decode_energy",
     "decode_firmware_version",

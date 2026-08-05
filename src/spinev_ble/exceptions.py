@@ -32,5 +32,22 @@ class SpinEvPasswordError(SpinEvError):
     """
 
 
+class SpinEvCommandRejectedError(SpinEvError):
+    """The charger received a start or stop command and refused it.
+
+    The command did not take effect: the charger is still in whatever state it
+    was in before. The usual cause is a wrong Bluetooth password, since the
+    charger reports a bad password by refusing the command rather than by
+    reporting a distinct error.
+    """
+
+
+class SpinEvBusyError(SpinEvError):
+    """The charger is mid-session, and the operation is not allowed during one.
+
+    Stop charging first, or wait for the session to end.
+    """
+
+
 class SpinEvValueError(SpinEvError, ValueError):
     """A value passed to a setter is outside the range the charger accepts."""
