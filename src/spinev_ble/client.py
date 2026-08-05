@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
 
@@ -18,8 +19,12 @@ from .const import (
     DEFAULT_MAX_CURRENT_A,
     DEFAULT_TIMEOUT,
     MAX_PORT,
+    MAX_RANDOM_DELAY_S,
     MAX_WIFI_FIELD_LEN,
     MIN_CURRENT_A,
+    OCPP_ID_FIELD_BYTES,
+    OCPP_TEXT_FIELD_BYTES,
+    WIFI_FIELD_BYTES,
     ChargerState,
     Command,
     Register,
@@ -35,10 +40,14 @@ from .models import ChargerStatus, ChargingSession, OcppConfig
 from .protocol import (
     VALUE_LENGTH,
     VALUE_OFFSET,
+    build_clock_date,
+    build_clock_time,
+    build_commit,
     build_control,
     build_read,
+    build_string_write,
+    build_timezone,
     build_write_float,
-    build_write_string,
     build_write_uint,
     decode_alarms,
     decode_energy,
@@ -145,7 +154,7 @@ class SpinEvCharger:
         self._client_class: ClientFactory = client_class or BleakClient
         self._client: BleakClientLike | None = None
         self._lock = asyncio.Lock()
-        self._waiters: dict[int, asyncio.Future[bytes]] = {}
+        self._waiters: dict[int, tuple[asyncio.Future[bytes], int]] = {}
         self._bulk: list[bytes] = []
         self._bulk_event = asyncio.Event()
 
@@ -201,7 +210,7 @@ class SpinEvCharger:
 
     def _on_disconnect(self, _client: object) -> None:
         """Fail anything in flight instead of letting it wait for the timeout."""
-        for future in self._waiters.values():
+        for future, _flag in self._waiters.values():
             if not future.done():
                 future.set_exception(SpinEvConnectionError("charger disconnected"))
         self._waiters.clear()
@@ -216,17 +225,26 @@ class SpinEvCharger:
             self._bulk_event.set()
             return
         if is_reply(payload):
-            # Replies echo the register in byte 2. Match on that and hand back
-            # the whole payload, so both fixed 8-byte replies and the longer
-            # variable-length text replies (WiFi, OCPP) go to the right waiter.
+            # Replies echo the register in byte 2 and the flag in byte 3.
+            # Match on both: the charger echoes every frame it accepts, not
+            # just the ones :meth:`_request` waits for, so a chunk of a
+            # fire-and-forget string write (its sequence number sits where
+            # the flag would be) can arrive for the same register a pending
+            # request is waiting on. Checking the flag too keeps that echo
+            # from being handed to the wrong waiter as if it were, say, the
+            # answer to a read.
             register = payload[2]
-            waiter = self._waiters.pop(register, None)
-            if waiter is not None and not waiter.done():
-                waiter.set_result(payload)
+            waiting = self._waiters.get(register)
+            if waiting is not None and payload[3] == waiting[1]:
+                future, _flag = waiting
+                del self._waiters[register]
+                if not future.done():
+                    future.set_result(payload)
             else:
                 _LOGGER.debug(
-                    "no waiter for reply to register 0x%02X, %d bytes",
+                    "no waiter for reply to register 0x%02X, flag 0x%02X, %d bytes",
                     register,
+                    payload[3],
                     len(payload),
                 )
             return
@@ -235,15 +253,15 @@ class SpinEvCharger:
     async def _request(self, frame: bytes, register: int) -> bytes:
         """Send a frame and wait for the matching reply.
 
-        Replies are matched on the register byte because the charger does not
-        guarantee ordering when several requests are in flight. Requests are
-        serialised anyway.
+        Replies are matched on the register byte and the flag byte the
+        charger echoes back, because the charger does not guarantee ordering
+        when several requests are in flight. Requests are serialised anyway.
         """
         client = self._require_client()
         async with self._lock:
             loop = asyncio.get_running_loop()
             future: asyncio.Future[bytes] = loop.create_future()
-            self._waiters[register] = future
+            self._waiters[register] = (future, frame[3])
             try:
                 await client.write_gatt_char(CHARACTERISTIC_UUID, frame, response=True)
                 payload = await asyncio.wait_for(future, timeout=self._timeout)
@@ -259,6 +277,24 @@ class SpinEvCharger:
             finally:
                 self._waiters.pop(register, None)
             return payload
+
+    async def _write_frames(self, frames: list[bytes]) -> None:
+        """Send configuration frames, waiting only for each write to be acked.
+
+        The charger does echo most of these back as a notification, the same
+        way it does for :meth:`_request`, but nothing here needs it: the
+        write already succeeded once the acknowledgement above returns, and
+        any echo that shows up afterwards is dropped as an unmatched reply.
+        """
+        client = self._require_client()
+        async with self._lock:
+            try:
+                for frame in frames:
+                    await client.write_gatt_char(
+                        CHARACTERISTIC_UUID, frame, response=True
+                    )
+            except Exception as err:
+                raise SpinEvConnectionError(f"write failed: {err}") from err
 
     async def async_read_raw(self, register: int, parameter: int = 0) -> bytes:
         """Read a register and return its four raw value bytes."""
@@ -420,7 +456,7 @@ class SpinEvCharger:
         return await self.async_read_string(Register.WIFI_PASSWORD)
 
     async def async_set_wifi(self, ssid: str, password: str) -> None:
-        """Point the charger at a WiFi network.
+        """Point the charger at a WiFi network and apply it.
 
         .. warning::
            A wrong value here can leave the charger unable to reach any network
@@ -435,13 +471,12 @@ class SpinEvCharger:
         """
         self._check_wifi_field("ssid", ssid)
         self._check_wifi_field("password", password)
-        await self._request(
-            build_write_string(Register.WIFI_SSID, ssid), Register.WIFI_SSID
-        )
-        await self._request(
-            build_write_string(Register.WIFI_PASSWORD, password),
-            Register.WIFI_PASSWORD,
-        )
+        frames = [
+            *build_string_write(Register.WIFI_SSID, ssid, WIFI_FIELD_BYTES),
+            *build_string_write(Register.WIFI_PASSWORD, password, WIFI_FIELD_BYTES),
+        ]
+        await self._write_frames(frames)
+        await self._commit()
 
     @staticmethod
     def _check_wifi_field(name: str, value: str) -> None:
@@ -471,7 +506,7 @@ class SpinEvCharger:
         )
 
     async def async_set_ocpp_config(self, config: OcppConfig) -> None:
-        """Point the charger at an OCPP central system.
+        """Point the charger at an OCPP central system and apply it.
 
         .. warning::
            A wrong value here leaves the charger unable to reach a central
@@ -487,22 +522,90 @@ class SpinEvCharger:
             raise SpinEvValueError(
                 f"ocpp port {config.port} is out of range 1 to {MAX_PORT}"
             )
-        await self._request(
-            build_write_string(Register.OCPP_HOST, config.host),
-            Register.OCPP_HOST,
-        )
-        await self._request(
+        frames = [
+            *build_string_write(Register.OCPP_HOST, config.host, OCPP_TEXT_FIELD_BYTES),
             build_write_uint(Register.OCPP_PORT, config.port),
-            Register.OCPP_PORT,
+            *build_string_write(Register.OCPP_PATH, config.path, OCPP_TEXT_FIELD_BYTES),
+            *build_string_write(
+                Register.OCPP_CHARGE_POINT_ID,
+                config.charge_point_id,
+                OCPP_ID_FIELD_BYTES,
+            ),
+        ]
+        await self._write_frames(frames)
+        await self._commit()
+
+    async def async_get_timezone(self) -> tuple[int, int]:
+        """Read the charger's UTC offset as an ``(hours, minutes)`` pair."""
+        value = decode_uint(await self.async_read_raw(Register.TIMEZONE))
+        return (value >> 8) & 0xFF, value & 0xFF
+
+    async def async_set_timezone(self, hours: int, minutes: int = 0) -> None:
+        """Set the charger's UTC offset and apply it.
+
+        :raises SpinEvValueError: if the offset is out of range.
+        """
+        if not (0 <= hours < 24 and 0 <= minutes < 60):
+            raise SpinEvValueError("timezone offset out of range")
+        await self._write_frames([build_timezone(hours, minutes)])
+        await self._commit()
+
+    async def async_sync_clock(self, when: datetime | None = None) -> None:
+        """Set the charger's clock, defaulting to now.
+
+        ``when`` is used as given; pass an aware or local time in whatever zone
+        the charger is configured for. The charger keeps no sub-second field.
+        """
+        moment = when or datetime.now()
+        await self._write_frames(
+            [
+                build_clock_time(moment.hour, moment.minute, moment.second),
+                build_clock_date(moment.year, moment.month, moment.day),
+            ]
         )
-        await self._request(
-            build_write_string(Register.OCPP_PATH, config.path),
-            Register.OCPP_PATH,
+        await self._commit()
+
+    async def async_get_random_delay(self) -> int:
+        """Read the charging start delay in seconds, 0 when disabled."""
+        return decode_uint(await self.async_read_raw(Register.RANDOM_DELAY))
+
+    async def async_set_random_delay(self, seconds: int) -> None:
+        """Set a delay before charging starts, and apply it.
+
+        ``seconds`` is 0 to :data:`~spinev_ble.const.MAX_RANDOM_DELAY_S`; 0
+        disables the delay.
+
+        :raises SpinEvValueError: if ``seconds`` is out of range.
+        """
+        if not 0 <= seconds <= MAX_RANDOM_DELAY_S:
+            raise SpinEvValueError(
+                f"delay {seconds} s is out of range 0 to {MAX_RANDOM_DELAY_S}"
+            )
+        await self._write_frames([build_write_uint(Register.RANDOM_DELAY, seconds)])
+        await self._commit()
+
+    async def async_set_internet_connectivity(self, enabled: bool) -> None:
+        """Enable or disable the charger's internet connectivity, and apply it."""
+        await self._write_frames(
+            [build_write_uint(Register.INTERNET_CONNECTIVITY, int(enabled))]
         )
-        await self._request(
-            build_write_string(Register.OCPP_CHARGE_POINT_ID, config.charge_point_id),
-            Register.OCPP_CHARGE_POINT_ID,
-        )
+        await self._commit()
+
+    async def _commit(self) -> None:
+        """Tell the charger to apply the configuration just written."""
+        await self._write_frames([build_commit()])
+
+    async def async_reboot(self) -> None:
+        """Reboot the charger.
+
+        Sends the same frame the other configuration setters use to apply a
+        change.
+        It does not necessarily drop the BLE link right away, so do not assume
+        the connection is gone, but a vehicle mid-session is interrupted.
+        Useful for recovering from a state that will not clear itself, such as
+        :attr:`ChargerState.FAULT`, without touching physical power.
+        """
+        await self._commit()
 
     async def async_get_history(
         self, count: int = DEFAULT_HISTORY_COUNT

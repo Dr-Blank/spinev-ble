@@ -22,6 +22,7 @@ import struct
 from datetime import datetime
 
 from .const import (
+    COMMIT_VALUE,
     ENERGY_SCALE,
     EVENT_RECORD_LENGTH,
     FRAME_HEADER,
@@ -96,19 +97,71 @@ def build_write_float(register: int, value: float) -> bytes:
     return FRAME_HEADER + bytes([register, Operation.WRITE]) + struct.pack(">f", value)
 
 
-def build_write_string(register: int, value: str) -> bytes:
-    """Build a write request carrying an ASCII string.
+def build_string_write(register: int, value: str, field_bytes: int) -> list[bytes]:
+    """Build the frames that write a text setting.
 
-    Text settings (the WiFi and OCPP configuration) are sent as their raw ASCII
-    bytes after the ``10 AC <reg> 01`` header.
+    Text settings (the WiFi and OCPP configuration) are written in four byte
+    pieces, each in its own frame ``10 AC <reg> <seq>`` where ``<seq>`` counts
+    from 1. The value is zero padded to ``field_bytes``, which must be a
+    multiple of four, so the number of frames is fixed regardless of the value.
 
-    :raises SpinEvProtocolError: if ``value`` is not pure ASCII.
+    :raises SpinEvProtocolError: if ``value`` is not ASCII, is longer than
+        ``field_bytes``, or ``field_bytes`` is not a multiple of four.
     """
+    if field_bytes <= 0 or field_bytes % 4:
+        raise SpinEvProtocolError("field_bytes must be a positive multiple of 4")
     try:
         payload = value.encode("ascii")
     except UnicodeEncodeError as err:
         raise SpinEvProtocolError("value must be ASCII") from err
-    return FRAME_HEADER + bytes([register, Operation.WRITE]) + payload
+    if len(payload) > field_bytes:
+        raise SpinEvProtocolError(
+            f"value is {len(payload)} bytes, limit is {field_bytes}"
+        )
+    payload = payload.ljust(field_bytes, b"\x00")
+    return [
+        FRAME_HEADER + bytes([register, offset // 4 + 1]) + payload[offset : offset + 4]
+        for offset in range(0, field_bytes, 4)
+    ]
+
+
+def build_clock_time(hour: int, minute: int, second: int) -> bytes:
+    """Build a write of the clock time, packed as ``00 SS MM HH``.
+
+    :raises SpinEvProtocolError: if any component is out of range.
+    """
+    if not (0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60):
+        raise SpinEvProtocolError("time component out of range")
+    return build_write_uint(Register.CLOCK_TIME, (second << 16) | (minute << 8) | hour)
+
+
+def build_clock_date(year: int, month: int, day: int) -> bytes:
+    """Build a write of the clock date, packed as ``00 DD MM YY``.
+
+    ``month`` is 1 to 12 and is stored zero based; ``year`` is a full year and
+    is stored as an offset from 1900.
+
+    :raises SpinEvProtocolError: if any component is out of range.
+    """
+    if not (1900 <= year <= 2155 and 1 <= month <= 12 and 1 <= day <= 31):
+        raise SpinEvProtocolError("date component out of range")
+    value = (day << 16) | ((month - 1) << 8) | (year - YEAR_EPOCH)
+    return build_write_uint(Register.CLOCK_DATE, value)
+
+
+def build_timezone(hours: int, minutes: int) -> bytes:
+    """Build a write of the UTC offset, packed as ``00 00 HH MM``.
+
+    :raises SpinEvProtocolError: if the offset is out of range.
+    """
+    if not (0 <= hours < 24 and 0 <= minutes < 60):
+        raise SpinEvProtocolError("timezone offset out of range")
+    return build_write_uint(Register.TIMEZONE, (hours << 8) | minutes)
+
+
+def build_commit() -> bytes:
+    """Build the frame that applies a batch of configuration writes."""
+    return build_write_uint(Register.COMMIT, COMMIT_VALUE)
 
 
 def decode_string(raw: bytes) -> str:

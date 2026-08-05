@@ -16,10 +16,14 @@ from spinev_ble import (
     Register,
     SpinEvPasswordError,
     SpinEvProtocolError,
+    build_clock_date,
+    build_clock_time,
+    build_commit,
     build_control,
     build_read,
+    build_string_write,
+    build_timezone,
     build_write_float,
-    build_write_string,
     build_write_uint,
     decode_alarms,
     decode_energy,
@@ -220,29 +224,72 @@ class TestAlarms:
 
 
 class TestStringRegisters:
-    def test_build_write_string(self) -> None:
-        # 10 AC <reg> 01 then the raw ASCII bytes.
-        frame = build_write_string(Register.WIFI_SSID, "MyNet")
-        assert frame.hex() == "10ac6101" + b"MyNet".hex()
-        assert frame[:4].hex() == "10ac6101"
-        assert frame[4:] == b"MyNet"
+    def test_chunks_are_four_bytes_with_incrementing_sequence(self) -> None:
+        frames = build_string_write(Register.WIFI_SSID, "test", 32)
+        assert len(frames) == 8
+        # first chunk carries the value, header 10 AC <reg> <seq=01>
+        assert frames[0].hex() == "10ac6301" + b"test".hex()
+        # later chunks are zero padded with the running sequence number
+        assert frames[1].hex() == "10ac630200000000"
+        assert frames[7].hex() == "10ac630800000000"
 
-    def test_build_write_string_ocpp_host(self) -> None:
-        frame = build_write_string(Register.OCPP_HOST, "ws.example.org")
-        assert frame[:4].hex() == "10ac6401"
-        assert frame[4:] == b"ws.example.org"
+    def test_multi_chunk_value(self) -> None:
+        frames = build_string_write(Register.WIFI_PASSWORD, "ExampleSecret12", 32)
+        joined = b"".join(f[4:] for f in frames)
+        assert joined == b"ExampleSecret12".ljust(32, b"\x00")
+        assert [f[3] for f in frames] == list(range(1, 9))
 
-    def test_build_write_string_rejects_non_ascii(self) -> None:
+    def test_sixty_four_byte_field(self) -> None:
+        frames = build_string_write(Register.OCPP_HOST, "host.example.com", 64)
+        assert len(frames) == 16
+        assert frames[-1][3] == 0x10
+
+    def test_rejects_too_long(self) -> None:
         with pytest.raises(SpinEvProtocolError):
-            build_write_string(Register.WIFI_SSID, "café")
+            build_string_write(Register.WIFI_SSID, "x" * 33, 32)
+
+    def test_rejects_bad_field_width(self) -> None:
+        with pytest.raises(SpinEvProtocolError):
+            build_string_write(Register.WIFI_SSID, "x", 30)
+
+    def test_rejects_non_ascii(self) -> None:
+        with pytest.raises(SpinEvProtocolError):
+            build_string_write(Register.WIFI_SSID, "café", 32)
 
     def test_decode_string_strips_padding(self) -> None:
-        # Value bytes as they arrive after the 4 byte header, zero padded.
-        raw = b"HomeWiFi" + b"\x00" * 12
-        assert decode_string(raw) == "HomeWiFi"
+        assert decode_string(b"HomeWiFi" + b"\x00" * 12) == "HomeWiFi"
 
     def test_decode_string_trims_whitespace(self) -> None:
         assert decode_string(b"  edge  \x00\x00") == "edge"
 
     def test_decode_string_empty(self) -> None:
         assert decode_string(b"\x00\x00\x00\x00") == ""
+
+
+class TestConfigWrites:
+    def test_clock_time_packs_ss_mm_hh(self) -> None:
+        # 12:39:12 -> 00 SS MM HH -> 00 0c 27 0c
+        assert build_clock_time(12, 39, 12).hex() == "10ac3f01000c270c"
+
+    def test_clock_time_range(self) -> None:
+        with pytest.raises(SpinEvProtocolError):
+            build_clock_time(24, 0, 0)
+
+    def test_clock_date_packs_dd_mm_yy(self) -> None:
+        # 2026-08-05 -> day 5, month 7 (0-based), year 126 -> 00 05 07 7e
+        assert build_clock_date(2026, 8, 5).hex() == "10ac40010005077e"
+
+    def test_clock_date_range(self) -> None:
+        with pytest.raises(SpinEvProtocolError):
+            build_clock_date(2026, 13, 1)
+
+    def test_timezone_packs_hh_mm(self) -> None:
+        # +05:30 -> value 00 00 05 1e
+        assert build_timezone(5, 30).hex() == "10ac78010000051e"
+
+    def test_timezone_range(self) -> None:
+        with pytest.raises(SpinEvProtocolError):
+            build_timezone(5, 60)
+
+    def test_commit_frame(self) -> None:
+        assert build_commit().hex() == "10ac3b0101000000"
