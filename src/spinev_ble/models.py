@@ -62,6 +62,31 @@ class OcppConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class LoadBalancingConfig:
+    """How the charger shares a supply with the rest of the installation.
+
+    Load balancing exists to keep the whole installation inside what the grid
+    connection can carry, so these settings describe the supply and the
+    protection around it, not the charger's own rating. When
+    :attr:`enabled` is false the charger ignores them and simply charges up to
+    its current limit.
+
+    This library reads these but does not write them. Raising
+    :attr:`grid_current_limit_a` or :attr:`max_grid_power_w` past what the
+    supply actually is removes the protection that stops the charger
+    overloading it.
+    """
+
+    enabled: bool
+    grid_current_limit_a: float
+    safe_current_offset_a: float
+    reduce_current_offset_a: float
+    max_grid_power_w: float
+    source: int
+    priority: int
+
+
+@dataclass(frozen=True, slots=True)
 class ChargerStatus:
     """An immutable snapshot of the charger.
 

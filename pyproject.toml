@@ -127,4 +127,4 @@ disable = [
 [tool.pylint.design]
 # SpinEvCharger is one accessor per charger register, so the count tracks the
 # device's surface rather than the class doing too much.
-max-public-methods = 30
+max-public-methods = 40

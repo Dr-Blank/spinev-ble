@@ -5,6 +5,7 @@ No hardware and no Bluetooth adapter are involved.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -13,8 +14,12 @@ import pytest
 
 from spinev_ble import (
     ChargerState,
+    LoadBalancingConfig,
     OcppConfig,
+    Operation,
     Register,
+    SpinEvBusyError,
+    SpinEvCommandRejectedError,
     SpinEvConnectionError,
     SpinEvProtocolError,
     SpinEvTimeoutError,
@@ -141,6 +146,30 @@ class TestTransportContract:
             transport.notify(reply(Register.VOLTAGE, bytes.fromhex("438003d7")))
             assert await charger.async_get_power() == pytest.approx(3859.84, abs=0.01)
 
+    async def test_stray_write_echo_does_not_corrupt_a_pending_read(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        """A write's echo to a register must not answer an unrelated read of it.
+
+        The charger echoes every accepted frame back, including the chunks
+        of a fire-and-forget string write, whose sequence number sits in the
+        byte a read reply would use for its flag. If a reply were matched on
+        the register alone, a chunk echo left in flight from an earlier
+        write could be handed to a later read waiting on the same register,
+        silently returning the wrong value instead of the string just read.
+        """
+        async with make_charger(client_class) as charger:
+            read_task = asyncio.ensure_future(charger.async_get_wifi_ssid())
+            await asyncio.sleep(0.01)  # let the read register its waiter
+
+            # A leftover echo from a WiFi SSID write chunk: same register,
+            # but the flag byte holds a chunk sequence number, not 0x00.
+            transport.notify(reply(Register.WIFI_SSID, b"Evil", flag=1))
+            assert not read_task.done()
+
+            transport.notify(string_reply(Register.WIFI_SSID, "ExampleNet"))
+            assert await read_task == "ExampleNet"
+
 
 class TestTelemetry:
     async def test_individual_reads(
@@ -216,9 +245,6 @@ class TestControl:
     async def test_start_and_stop_send_the_password(
         self, transport: FakeTransport, client_class: Callable[..., Any]
     ) -> None:
-        transport.replies = {
-            Register.CONTROL: reply(Register.CONTROL, bytes.fromhex("00000000"))
-        }
         async with make_charger(client_class) as charger:
             await charger.async_start_charging()
             await charger.async_stop_charging()
@@ -230,7 +256,6 @@ class TestControl:
     ) -> None:
         transport.replies = {
             Register.PASSWORD: reply(Register.PASSWORD, bytes.fromhex("00abcdef")),
-            Register.CONTROL: reply(Register.CONTROL, bytes.fromhex("00000000")),
         }
         async with make_charger(client_class, password=None) as charger:
             assert await charger.async_get_password() == DUMMY_PASSWORD
@@ -239,6 +264,36 @@ class TestControl:
         # Read once on first use, then cached rather than re-read.
         assert sum(1 for w in transport.writes if w[2] == Register.PASSWORD) == 2
         assert transport.writes[-1].hex() == "10ac3c0110abcdef"
+
+    @pytest.mark.parametrize("command", ["async_start_charging", "async_stop_charging"])
+    async def test_a_refused_command_raises_instead_of_reporting_success(
+        self,
+        transport: FakeTransport,
+        client_class: Callable[..., Any],
+        command: str,
+    ) -> None:
+        transport.replies = {
+            Register.CONTROL: reply(
+                Register.CONTROL, bytes.fromhex("ffffffff"), flag=Operation.WRITE
+            )
+        }
+        async with make_charger(client_class) as charger:
+            with pytest.raises(SpinEvCommandRejectedError):
+                await getattr(charger, command)()
+
+    async def test_a_command_echoed_back_altered_is_not_taken_as_success(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        # A stop echoed back where a start was sent means the charger did
+        # something other than what was asked, so it cannot be reported as done.
+        transport.replies = {
+            Register.CONTROL: reply(
+                Register.CONTROL, bytes.fromhex("10abcdef"), flag=Operation.WRITE
+            )
+        }
+        async with make_charger(client_class) as charger:
+            with pytest.raises(SpinEvProtocolError):
+                await charger.async_start_charging()
 
     async def test_password_high_byte_is_masked_off(
         self, transport: FakeTransport, client_class: Callable[..., Any]
@@ -254,13 +309,19 @@ class TestControl:
         self, transport: FakeTransport, client_class: Callable[..., Any], amps: float
     ) -> None:
         transport.replies = {
+            Register.STATE: reply(Register.STATE, bytes.fromhex("00000002")),
             Register.CURRENT_LIMIT: reply(
-                Register.CURRENT_LIMIT, bytes.fromhex("41800000")
-            )
+                Register.CURRENT_LIMIT,
+                bytes.fromhex("41800000"),
+                flag=Operation.WRITE,
+            ),
         }
         async with make_charger(client_class) as charger:
             await charger.async_set_current_limit(amps)
         assert transport.writes[-1][:4].hex() == "10ac4f01"
+        # Deliberately not committed: a commit restarts the charger, which
+        # would drop a session in progress just to change its current.
+        assert not any(w.hex() == "10ac3b0101000000" for w in transport.writes)
 
     @pytest.mark.parametrize("amps", [5.9, 0.0, -1.0, 32.1, 100.0])
     async def test_current_limit_rejects_out_of_range(
@@ -275,14 +336,24 @@ class TestControl:
         self, transport: FakeTransport, client_class: Callable[..., Any]
     ) -> None:
         transport.replies = {
+            Register.STATE: reply(Register.STATE, bytes.fromhex("00000002")),
             Register.CURRENT_LIMIT: reply(
-                Register.CURRENT_LIMIT, bytes.fromhex("41800000")
-            )
+                Register.CURRENT_LIMIT,
+                bytes.fromhex("41800000"),
+                flag=Operation.WRITE,
+            ),
         }
         async with make_charger(client_class) as charger:
             await charger.async_set_current_limit(40.0, max_amps=63.0)
             with pytest.raises(SpinEvValueError):
                 await charger.async_set_current_limit(40.0, max_amps=32.0)
+
+    async def test_reboot_sends_the_commit_frame(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        async with make_charger(client_class) as charger:
+            await charger.async_reboot()
+        assert transport.writes[-1].hex() == "10ac3b0101000000"
 
 
 class TestNetworkConfig:
@@ -297,17 +368,19 @@ class TestNetworkConfig:
             assert await charger.async_get_wifi_ssid() == "ExampleNet"
             assert await charger.async_get_wifi_password() == "hunter2"
 
-    async def test_writes_both_wifi_fields(
+    async def test_writes_wifi_chunked_then_commits(
         self, transport: FakeTransport, client_class: Callable[..., Any]
     ) -> None:
-        transport.replies = {
-            Register.WIFI_SSID: string_reply(Register.WIFI_SSID, "ExampleNet"),
-            Register.WIFI_PASSWORD: string_reply(Register.WIFI_PASSWORD, "secret"),
-        }
         async with make_charger(client_class) as charger:
             await charger.async_set_wifi("ExampleNet", "secret")
-        assert transport.writes[0] == b"\x10\xac\x61\x01ExampleNet"
-        assert transport.writes[1] == b"\x10\xac\x63\x01secret"
+        writes = transport.writes
+        # 8 SSID chunks (0x63), 8 password chunks (0x61), 1 commit (0x3B)
+        assert len(writes) == 8 + 8 + 1
+        assert writes[0] == b"\x10\xac\x63\x01Exam"
+        assert writes[8] == b"\x10\xac\x61\x01secr"
+        assert writes[-1].hex() == "10ac3b0101000000"
+        ssid = b"".join(w[4:] for w in writes[0:8])
+        assert ssid == b"ExampleNet".ljust(32, b"\x00")
 
     @pytest.mark.parametrize("field", ["ssid", "password"])
     async def test_wifi_rejects_over_long_fields(
@@ -330,6 +403,64 @@ class TestNetworkConfig:
             with pytest.raises(SpinEvValueError, match="double quote"):
                 await charger.async_set_wifi(values["ssid"], values["password"])
         assert transport.writes == []
+
+    async def test_reads_load_balancing_config(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        transport.replies = {
+            Register.LOAD_BALANCING_ENABLED: reply(
+                Register.LOAD_BALANCING_ENABLED, bytes.fromhex("00000001")
+            ),
+            Register.GRID_CURRENT_LIMIT: reply(
+                Register.GRID_CURRENT_LIMIT, bytes.fromhex("42480000")
+            ),
+            Register.SAFE_CURRENT_OFFSET: reply(
+                Register.SAFE_CURRENT_OFFSET, bytes.fromhex("40a00000")
+            ),
+            Register.REDUCE_CURRENT_OFFSET: reply(
+                Register.REDUCE_CURRENT_OFFSET, bytes.fromhex("40000000")
+            ),
+            Register.MAX_GRID_POWER: reply(
+                Register.MAX_GRID_POWER, bytes.fromhex("45895440")
+            ),
+            Register.LOAD_BALANCING_SOURCE: reply(
+                Register.LOAD_BALANCING_SOURCE, bytes.fromhex("00000001")
+            ),
+            Register.LOAD_BALANCING_PRIORITY: reply(
+                Register.LOAD_BALANCING_PRIORITY, bytes.fromhex("00000002")
+            ),
+        }
+        async with make_charger(client_class) as charger:
+            config = await charger.async_get_load_balancing()
+        assert config == LoadBalancingConfig(
+            enabled=True,
+            grid_current_limit_a=50.0,
+            safe_current_offset_a=5.0,
+            reduce_current_offset_a=2.0,
+            max_grid_power_w=4394.53125,
+            source=1,
+            priority=2,
+        )
+
+    async def test_load_balancing_reports_when_it_is_off(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        zero = bytes.fromhex("00000000")
+        transport.replies = {
+            register: reply(register, zero)
+            for register in (
+                Register.LOAD_BALANCING_ENABLED,
+                Register.GRID_CURRENT_LIMIT,
+                Register.SAFE_CURRENT_OFFSET,
+                Register.REDUCE_CURRENT_OFFSET,
+                Register.MAX_GRID_POWER,
+                Register.LOAD_BALANCING_SOURCE,
+                Register.LOAD_BALANCING_PRIORITY,
+            )
+        }
+        async with make_charger(client_class) as charger:
+            config = await charger.async_get_load_balancing()
+        assert config.enabled is False
 
     async def test_reads_ocpp_config(
         self, transport: FakeTransport, client_class: Callable[..., Any]
@@ -369,14 +500,18 @@ class TestNetworkConfig:
         )
         async with make_charger(client_class) as charger:
             await charger.async_set_ocpp_config(config)
-        written = [w[2] for w in transport.writes]
-        assert written == [
-            Register.OCPP_HOST,
-            Register.OCPP_PORT,
-            Register.OCPP_PATH,
-            Register.OCPP_CHARGE_POINT_ID,
-        ]
-        assert transport.writes[1].hex() == "10ac5e0100000050"
+        writes = transport.writes
+        registers = [w[2] for w in writes]
+        assert registers == (
+            [Register.OCPP_HOST] * 16
+            + [Register.OCPP_PORT]
+            + [Register.OCPP_PATH] * 16
+            + [Register.OCPP_CHARGE_POINT_ID] * 8
+            + [Register.COMMIT]
+        )
+        assert writes[16].hex() == "10ac5e0100000050"
+        host = b"".join(w[4:] for w in writes[0:16])
+        assert host == b"dns:example.com".ljust(64, b"\x00")
 
     @pytest.mark.parametrize("port", [0, -1, 65536, 999999])
     async def test_ocpp_rejects_impossible_ports(
@@ -398,6 +533,44 @@ class TestNetworkConfig:
             with pytest.raises(SpinEvValueError, match="host"):
                 await charger.async_set_ocpp_config(config)
         assert transport.writes == []
+
+    async def test_sets_and_reads_timezone(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        transport.replies = {
+            Register.TIMEZONE: reply(Register.TIMEZONE, bytes.fromhex("0000051e")),
+        }
+        async with make_charger(client_class) as charger:
+            await charger.async_set_timezone(5, 30)
+            assert await charger.async_get_timezone() == (5, 30)
+        assert transport.writes[0].hex() == "10ac78010000051e"
+        assert transport.writes[1].hex() == "10ac3b0101000000"
+
+    async def test_sets_random_delay_then_commits(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        async with make_charger(client_class) as charger:
+            await charger.async_set_random_delay(600)
+        assert transport.writes[0].hex() == "10acc20100000258"
+        assert transport.writes[-1].hex() == "10ac3b0101000000"
+
+    async def test_random_delay_rejects_out_of_range(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        async with make_charger(client_class) as charger:
+            with pytest.raises(SpinEvValueError):
+                await charger.async_set_random_delay(1801)
+        assert transport.writes == []
+
+    async def test_syncs_clock(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        async with make_charger(client_class) as charger:
+            await charger.async_sync_clock(datetime(2026, 8, 5, 12, 39, 12))
+        # time 00 SS MM HH, date 00 DD MM YY (month 0-based, year-1900)
+        assert transport.writes[0].hex() == "10ac3f01000c270c"
+        assert transport.writes[1].hex() == "10ac40010005077e"
+        assert transport.writes[2].hex() == "10ac3b0101000000"
 
 
 class TestHistory:
@@ -442,3 +615,122 @@ class TestHistory:
     ) -> None:
         with pytest.raises(SpinEvConnectionError, match="not connected"):
             await make_charger(client_class).async_get_history()
+
+
+class TestCommitBatching:
+    """Applying configuration restarts the charger, so it is controllable."""
+
+    async def test_setters_commit_by_default(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        async with make_charger(client_class) as charger:
+            await charger.async_set_timezone(1, 30)
+        assert transport.writes[-1].hex() == "10ac3b0101000000"
+
+    async def test_commit_can_be_deferred_and_batched(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        async with make_charger(client_class) as charger:
+            await charger.async_set_timezone(1, 30, commit=False)
+            await charger.async_set_random_delay(600, commit=False)
+            commits_before = [
+                w for w in transport.writes if w.hex() == "10ac3b0101000000"
+            ]
+            await charger.async_commit()
+        # Two settings, one restart, rather than one restart each.
+        assert commits_before == []
+        assert [w for w in transport.writes if w.hex() == "10ac3b0101000000"] == [
+            bytes.fromhex("10ac3b0101000000")
+        ]
+
+    async def test_current_limit_does_not_commit_unless_asked(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        transport.replies = {
+            Register.STATE: reply(Register.STATE, bytes.fromhex("00000002")),
+            Register.CURRENT_LIMIT: reply(
+                Register.CURRENT_LIMIT,
+                bytes.fromhex("41800000"),
+                flag=Operation.WRITE,
+            ),
+        }
+        async with make_charger(client_class) as charger:
+            await charger.async_set_current_limit(16.0)
+            assert not any(w.hex() == "10ac3b0101000000" for w in transport.writes)
+            await charger.async_set_current_limit(16.0, commit=True)
+        assert transport.writes[-1].hex() == "10ac3b0101000000"
+
+
+class TestCurrentLimitDuringASession:
+    """The charger refuses a limit change while a session is open."""
+
+    LIMIT_REPLY = reply(
+        Register.CURRENT_LIMIT, bytes.fromhex("41800000"), flag=Operation.WRITE
+    )
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            ChargerState.STARTING,
+            ChargerState.CHARGING,
+            ChargerState.EVSE_SUSPENDED,
+            ChargerState.EV_SUSPENDED,
+        ],
+    )
+    async def test_refused_while_a_session_is_open(
+        self,
+        transport: FakeTransport,
+        client_class: Callable[..., Any],
+        state: ChargerState,
+    ) -> None:
+        transport.replies = {
+            Register.STATE: reply(Register.STATE, int(state).to_bytes(4, "big")),
+            Register.CURRENT_LIMIT: self.LIMIT_REPLY,
+        }
+        async with make_charger(client_class) as charger:
+            with pytest.raises(SpinEvBusyError, match="during a session"):
+                await charger.async_set_current_limit(16.0)
+        # Nothing reached the charger.
+        assert not any(w[2] == Register.CURRENT_LIMIT for w in transport.writes)
+
+    @pytest.mark.parametrize(
+        "state", [ChargerState.AVAILABLE, ChargerState.IDLE, ChargerState.FINISHING]
+    )
+    async def test_allowed_between_sessions(
+        self,
+        transport: FakeTransport,
+        client_class: Callable[..., Any],
+        state: ChargerState,
+    ) -> None:
+        transport.replies = {
+            Register.STATE: reply(Register.STATE, int(state).to_bytes(4, "big")),
+            Register.CURRENT_LIMIT: self.LIMIT_REPLY,
+        }
+        async with make_charger(client_class) as charger:
+            await charger.async_set_current_limit(16.0)
+        assert transport.writes[-1][:4].hex() == "10ac4f01"
+
+    async def test_override_writes_anyway(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        transport.replies = {
+            Register.STATE: reply(Register.STATE, bytes.fromhex("00000004")),
+            Register.CURRENT_LIMIT: self.LIMIT_REPLY,
+        }
+        async with make_charger(client_class) as charger:
+            await charger.async_set_current_limit(16.0, allow_while_charging=True)
+        assert transport.writes[-1][:4].hex() == "10ac4f01"
+        # The override also skips the state read the check would have done.
+        assert not any(w[2] == Register.STATE for w in transport.writes)
+
+    async def test_an_unknown_state_does_not_block_the_write(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        """A state this library does not name must not become an exception."""
+        transport.replies = {
+            Register.STATE: reply(Register.STATE, bytes.fromhex("000000ff")),
+            Register.CURRENT_LIMIT: self.LIMIT_REPLY,
+        }
+        async with make_charger(client_class) as charger:
+            await charger.async_set_current_limit(16.0)
+        assert transport.writes[-1][:4].hex() == "10ac4f01"

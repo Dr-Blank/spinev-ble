@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
 
@@ -18,28 +19,43 @@ from .const import (
     DEFAULT_MAX_CURRENT_A,
     DEFAULT_TIMEOUT,
     MAX_PORT,
+    MAX_RANDOM_DELAY_S,
     MAX_WIFI_FIELD_LEN,
     MIN_CURRENT_A,
+    OCPP_ID_FIELD_BYTES,
+    OCPP_TEXT_FIELD_BYTES,
+    WIFI_FIELD_BYTES,
     ChargerState,
     Command,
     Register,
 )
 from .exceptions import (
+    SpinEvBusyError,
     SpinEvConnectionError,
     SpinEvError,
     SpinEvProtocolError,
     SpinEvTimeoutError,
     SpinEvValueError,
 )
-from .models import ChargerStatus, ChargingSession, OcppConfig
+from .models import (
+    ChargerStatus,
+    ChargingSession,
+    LoadBalancingConfig,
+    OcppConfig,
+)
 from .protocol import (
     VALUE_LENGTH,
     VALUE_OFFSET,
+    build_clock_date,
+    build_clock_time,
+    build_commit,
     build_control,
     build_read,
+    build_string_write,
+    build_timezone,
     build_write_float,
-    build_write_string,
     build_write_uint,
+    check_control_reply,
     decode_alarms,
     decode_energy,
     decode_firmware_version,
@@ -87,6 +103,17 @@ ClientFactory = Callable[..., BleakClientLike]
 """Builds the transport. Called with the device positionally plus ``timeout``
 and ``disconnected_callback`` keywords, so any replacement must accept those.
 :class:`bleak.BleakClient` and ``habluetooth.HaBleakClientWrapper`` both do."""
+
+# States in which a charging session is open, whether or not power is
+# flowing right now. A suspended session is still a session.
+_SESSION_OPEN_STATES = frozenset(
+    {
+        ChargerState.STARTING,
+        ChargerState.CHARGING,
+        ChargerState.EVSE_SUSPENDED,
+        ChargerState.EV_SUSPENDED,
+    }
+)
 
 # Registers read by async_get_status, in the order they are fetched, as
 # (attribute, register, decoder).
@@ -145,7 +172,7 @@ class SpinEvCharger:
         self._client_class: ClientFactory = client_class or BleakClient
         self._client: BleakClientLike | None = None
         self._lock = asyncio.Lock()
-        self._waiters: dict[int, asyncio.Future[bytes]] = {}
+        self._waiters: dict[int, tuple[asyncio.Future[bytes], int]] = {}
         self._bulk: list[bytes] = []
         self._bulk_event = asyncio.Event()
 
@@ -201,7 +228,7 @@ class SpinEvCharger:
 
     def _on_disconnect(self, _client: object) -> None:
         """Fail anything in flight instead of letting it wait for the timeout."""
-        for future in self._waiters.values():
+        for future, _flag in self._waiters.values():
             if not future.done():
                 future.set_exception(SpinEvConnectionError("charger disconnected"))
         self._waiters.clear()
@@ -216,17 +243,26 @@ class SpinEvCharger:
             self._bulk_event.set()
             return
         if is_reply(payload):
-            # Replies echo the register in byte 2. Match on that and hand back
-            # the whole payload, so both fixed 8-byte replies and the longer
-            # variable-length text replies (WiFi, OCPP) go to the right waiter.
+            # Replies echo the register in byte 2 and the flag in byte 3.
+            # Match on both: the charger echoes every frame it accepts, not
+            # just the ones :meth:`_request` waits for, so a chunk of a
+            # fire-and-forget string write (its sequence number sits where
+            # the flag would be) can arrive for the same register a pending
+            # request is waiting on. Checking the flag too keeps that echo
+            # from being handed to the wrong waiter as if it were, say, the
+            # answer to a read.
             register = payload[2]
-            waiter = self._waiters.pop(register, None)
-            if waiter is not None and not waiter.done():
-                waiter.set_result(payload)
+            waiting = self._waiters.get(register)
+            if waiting is not None and payload[3] == waiting[1]:
+                future, _flag = waiting
+                del self._waiters[register]
+                if not future.done():
+                    future.set_result(payload)
             else:
                 _LOGGER.debug(
-                    "no waiter for reply to register 0x%02X, %d bytes",
+                    "no waiter for reply to register 0x%02X, flag 0x%02X, %d bytes",
                     register,
+                    payload[3],
                     len(payload),
                 )
             return
@@ -235,15 +271,15 @@ class SpinEvCharger:
     async def _request(self, frame: bytes, register: int) -> bytes:
         """Send a frame and wait for the matching reply.
 
-        Replies are matched on the register byte because the charger does not
-        guarantee ordering when several requests are in flight. Requests are
-        serialised anyway.
+        Replies are matched on the register byte and the flag byte the
+        charger echoes back, because the charger does not guarantee ordering
+        when several requests are in flight. Requests are serialised anyway.
         """
         client = self._require_client()
         async with self._lock:
             loop = asyncio.get_running_loop()
             future: asyncio.Future[bytes] = loop.create_future()
-            self._waiters[register] = future
+            self._waiters[register] = (future, frame[3])
             try:
                 await client.write_gatt_char(CHARACTERISTIC_UUID, frame, response=True)
                 payload = await asyncio.wait_for(future, timeout=self._timeout)
@@ -259,6 +295,24 @@ class SpinEvCharger:
             finally:
                 self._waiters.pop(register, None)
             return payload
+
+    async def _write_frames(self, frames: list[bytes]) -> None:
+        """Send configuration frames, waiting only for each write to be acked.
+
+        The charger does echo most of these back as a notification, the same
+        way it does for :meth:`_request`, but nothing here needs it: the
+        write already succeeded once the acknowledgement above returns, and
+        any echo that shows up afterwards is dropped as an unmatched reply.
+        """
+        client = self._require_client()
+        async with self._lock:
+            try:
+                for frame in frames:
+                    await client.write_gatt_char(
+                        CHARACTERISTIC_UUID, frame, response=True
+                    )
+            except Exception as err:
+                raise SpinEvConnectionError(f"write failed: {err}") from err
 
     async def async_read_raw(self, register: int, parameter: int = 0) -> bytes:
         """Read a register and return its four raw value bytes."""
@@ -368,23 +422,51 @@ class SpinEvCharger:
 
         The charger acknowledges immediately but takes about one second to
         report the new state and about two seconds before power actually flows.
+
+        :raises SpinEvCommandRejectedError: if the charger refuses the command,
+            which normally means the Bluetooth password is wrong.
         """
-        password = await self._async_require_password()
-        await self._request(build_control(Command.START, password), Register.CONTROL)
+        await self._async_send_control(Command.START)
 
     async def async_stop_charging(self) -> None:
-        """Stop charging."""
+        """Stop charging.
+
+        :raises SpinEvCommandRejectedError: if the charger refuses the command,
+            which normally means the Bluetooth password is wrong.
+        """
+        await self._async_send_control(Command.STOP)
+
+    async def _async_send_control(self, command: Command) -> None:
+        """Send a control command and confirm the charger acted on it."""
         password = await self._async_require_password()
-        await self._request(build_control(Command.STOP, password), Register.CONTROL)
+        frame = build_control(command, password)
+        check_control_reply(frame, await self._request(frame, Register.CONTROL))
 
     async def async_set_current_limit(
-        self, amps: float, *, max_amps: float = DEFAULT_MAX_CURRENT_A
+        self,
+        amps: float,
+        *,
+        max_amps: float = DEFAULT_MAX_CURRENT_A,
+        commit: bool = False,
+        allow_while_charging: bool = False,
     ) -> None:
         """Set the charging current limit, in amps.
 
         This changes how much power the charger will deliver: single phase at
-        230 V, 6 A is about 1.4 kW and 32 A is about 7.4 kW. The new limit is
-        applied to the current session as well as future ones.
+        230 V, 6 A is about 1.4 kW and 32 A is about 7.4 kW.
+
+        **Not accepted while a session is running.** The charger is driven by a
+        phone app that refuses the change outright then, telling the user to
+        stop the session first, so a limit is normally set between sessions and
+        takes effect on the next one. This method checks the state first and
+        refuses to match, which costs one extra read.
+
+        ``allow_while_charging`` skips that check and writes anyway. Whether
+        the charger honours a mid-session change, ignores it, or faults the
+        session is not established, so treat it as an experiment: read the
+        limit back, and watch the state and delivered current afterwards. This
+        is the only route to varying current during a charge, which is what
+        tracking solar surplus needs, but it is unproven on this hardware.
 
         ``amps`` must be at least :data:`~spinev_ble.const.MIN_CURRENT_A` (the
         6 A EV floor, which does not vary by model) and at most ``max_amps``.
@@ -396,17 +478,37 @@ class SpinEvCharger:
         guard: always read :meth:`async_get_current_limit` back to confirm what
         the charger actually accepted.
 
+        ``commit`` defaults to off here, unlike the other setters, and there is
+        normally no reason to turn it on. The limit is stored as soon as it is
+        written: it survives a power cycle with no commit at all. Committing
+        restarts the charger, so it would cost a session and gain nothing. The
+        argument exists only so a limit change can be folded into a batch that
+        is being committed for some other setting's sake.
+
         :raises SpinEvValueError: if ``amps`` is outside the accepted range.
+        :raises SpinEvBusyError: if a session is running and
+            ``allow_while_charging`` is not set.
         """
         if not MIN_CURRENT_A <= amps <= max_amps:
             raise SpinEvValueError(
                 f"current limit {amps} A is out of range "
                 f"{MIN_CURRENT_A} to {max_amps} A"
             )
+        if not allow_while_charging:
+            # Compared as a raw number: an unrecognised state must not turn a
+            # limit change into an exception about the state itself.
+            state = await self.async_get_state_value()
+            if state in _SESSION_OPEN_STATES:
+                raise SpinEvBusyError(
+                    "the charger will not change its current limit during a "
+                    "session. Stop charging first, or pass "
+                    "allow_while_charging=True to write it anyway."
+                )
         await self._request(
             build_write_float(Register.CURRENT_LIMIT, amps),
             Register.CURRENT_LIMIT,
         )
+        await self._commit_if(commit)
 
     async def async_get_wifi_ssid(self) -> str:
         """Read the SSID of the WiFi network the charger is set to join."""
@@ -419,8 +521,10 @@ class SpinEvCharger:
         """
         return await self.async_read_string(Register.WIFI_PASSWORD)
 
-    async def async_set_wifi(self, ssid: str, password: str) -> None:
-        """Point the charger at a WiFi network.
+    async def async_set_wifi(
+        self, ssid: str, password: str, *, commit: bool = True
+    ) -> None:
+        """Point the charger at a WiFi network and apply it.
 
         .. warning::
            A wrong value here can leave the charger unable to reach any network
@@ -432,16 +536,19 @@ class SpinEvCharger:
         double quote.
 
         :raises SpinEvValueError: if either field breaks those rules.
+        ``commit`` applies the change, which **restarts the charger** and
+        ends any session in progress. Pass ``commit=False`` to write it now
+        and apply it later, with other changes, via :meth:`async_commit`.
+
         """
         self._check_wifi_field("ssid", ssid)
         self._check_wifi_field("password", password)
-        await self._request(
-            build_write_string(Register.WIFI_SSID, ssid), Register.WIFI_SSID
-        )
-        await self._request(
-            build_write_string(Register.WIFI_PASSWORD, password),
-            Register.WIFI_PASSWORD,
-        )
+        frames = [
+            *build_string_write(Register.WIFI_SSID, ssid, WIFI_FIELD_BYTES),
+            *build_string_write(Register.WIFI_PASSWORD, password, WIFI_FIELD_BYTES),
+        ]
+        await self._write_frames(frames)
+        await self._commit_if(commit)
 
     @staticmethod
     def _check_wifi_field(name: str, value: str) -> None:
@@ -451,6 +558,41 @@ class SpinEvCharger:
             )
         if '"' in value:
             raise SpinEvValueError(f"wifi {name} must not contain a double quote")
+
+    async def async_get_load_balancing(self) -> LoadBalancingConfig:
+        """Read how the charger shares its supply with the installation.
+
+        Useful for telling apart a charger that is limiting itself because it
+        was asked to from one that is limiting itself because the supply is
+        busy: when :attr:`LoadBalancingConfig.enabled` is true, delivered
+        current can sit below :meth:`async_get_current_limit` without anything
+        being wrong.
+
+        Seven registers, so this takes about a second.
+        """
+        return LoadBalancingConfig(
+            enabled=bool(
+                decode_uint(await self.async_read_raw(Register.LOAD_BALANCING_ENABLED))
+            ),
+            grid_current_limit_a=decode_float(
+                await self.async_read_raw(Register.GRID_CURRENT_LIMIT)
+            ),
+            safe_current_offset_a=decode_float(
+                await self.async_read_raw(Register.SAFE_CURRENT_OFFSET)
+            ),
+            reduce_current_offset_a=decode_float(
+                await self.async_read_raw(Register.REDUCE_CURRENT_OFFSET)
+            ),
+            max_grid_power_w=decode_float(
+                await self.async_read_raw(Register.MAX_GRID_POWER)
+            ),
+            source=decode_uint(
+                await self.async_read_raw(Register.LOAD_BALANCING_SOURCE)
+            ),
+            priority=decode_uint(
+                await self.async_read_raw(Register.LOAD_BALANCING_PRIORITY)
+            ),
+        )
 
     async def async_get_ocpp_config(self) -> OcppConfig:
         """Read the OCPP central-system settings.
@@ -470,8 +612,10 @@ class SpinEvCharger:
             charge_point_id=charge_point_id,
         )
 
-    async def async_set_ocpp_config(self, config: OcppConfig) -> None:
-        """Point the charger at an OCPP central system.
+    async def async_set_ocpp_config(
+        self, config: OcppConfig, *, commit: bool = True
+    ) -> None:
+        """Point the charger at an OCPP central system and apply it.
 
         .. warning::
            A wrong value here leaves the charger unable to reach a central
@@ -480,6 +624,10 @@ class SpinEvCharger:
 
         :raises SpinEvValueError: if the host is empty or the port is not a
             valid TCP port.
+        ``commit`` applies the change, which **restarts the charger** and
+        ends any session in progress. Pass ``commit=False`` to write it now
+        and apply it later, with other changes, via :meth:`async_commit`.
+
         """
         if not config.host:
             raise SpinEvValueError("ocpp host must not be empty")
@@ -487,22 +635,140 @@ class SpinEvCharger:
             raise SpinEvValueError(
                 f"ocpp port {config.port} is out of range 1 to {MAX_PORT}"
             )
-        await self._request(
-            build_write_string(Register.OCPP_HOST, config.host),
-            Register.OCPP_HOST,
-        )
-        await self._request(
+        frames = [
+            *build_string_write(Register.OCPP_HOST, config.host, OCPP_TEXT_FIELD_BYTES),
             build_write_uint(Register.OCPP_PORT, config.port),
-            Register.OCPP_PORT,
+            *build_string_write(Register.OCPP_PATH, config.path, OCPP_TEXT_FIELD_BYTES),
+            *build_string_write(
+                Register.OCPP_CHARGE_POINT_ID,
+                config.charge_point_id,
+                OCPP_ID_FIELD_BYTES,
+            ),
+        ]
+        await self._write_frames(frames)
+        await self._commit_if(commit)
+
+    async def async_get_timezone(self) -> tuple[int, int]:
+        """Read the charger's UTC offset as an ``(hours, minutes)`` pair."""
+        value = decode_uint(await self.async_read_raw(Register.TIMEZONE))
+        return (value >> 8) & 0xFF, value & 0xFF
+
+    async def async_set_timezone(
+        self, hours: int, minutes: int = 0, *, commit: bool = True
+    ) -> None:
+        """Set the charger's UTC offset and apply it.
+
+        :raises SpinEvValueError: if the offset is out of range.
+        ``commit`` applies the change, which **restarts the charger** and
+        ends any session in progress. Pass ``commit=False`` to write it now
+        and apply it later, with other changes, via :meth:`async_commit`.
+
+        """
+        if not (0 <= hours < 24 and 0 <= minutes < 60):
+            raise SpinEvValueError("timezone offset out of range")
+        await self._write_frames([build_timezone(hours, minutes)])
+        await self._commit_if(commit)
+
+    async def async_sync_clock(
+        self, when: datetime | None = None, *, commit: bool = True
+    ) -> None:
+        """Set the charger's clock, defaulting to now.
+
+        ``when`` is used as given; pass an aware or local time in whatever zone
+        the charger is configured for. The charger keeps no sub-second field.
+        ``commit`` applies the change, which **restarts the charger** and
+        ends any session in progress. Pass ``commit=False`` to write it now
+        and apply it later, with other changes, via :meth:`async_commit`.
+
+        """
+        moment = when or datetime.now()
+        await self._write_frames(
+            [
+                build_clock_time(moment.hour, moment.minute, moment.second),
+                build_clock_date(moment.year, moment.month, moment.day),
+            ]
         )
-        await self._request(
-            build_write_string(Register.OCPP_PATH, config.path),
-            Register.OCPP_PATH,
+        await self._commit_if(commit)
+
+    async def async_get_random_delay(self) -> int:
+        """Read the charging start delay in seconds, 0 when disabled."""
+        return decode_uint(await self.async_read_raw(Register.RANDOM_DELAY))
+
+    async def async_set_random_delay(
+        self, seconds: int, *, commit: bool = True
+    ) -> None:
+        """Set a delay before charging starts, and apply it.
+
+        ``seconds`` is 0 to :data:`~spinev_ble.const.MAX_RANDOM_DELAY_S`; 0
+        disables the delay.
+
+        :raises SpinEvValueError: if ``seconds`` is out of range.
+        ``commit`` applies the change, which **restarts the charger** and
+        ends any session in progress. Pass ``commit=False`` to write it now
+        and apply it later, with other changes, via :meth:`async_commit`.
+
+        """
+        if not 0 <= seconds <= MAX_RANDOM_DELAY_S:
+            raise SpinEvValueError(
+                f"delay {seconds} s is out of range 0 to {MAX_RANDOM_DELAY_S}"
+            )
+        await self._write_frames([build_write_uint(Register.RANDOM_DELAY, seconds)])
+        await self._commit_if(commit)
+
+    async def async_set_internet_connectivity(
+        self, enabled: bool, *, commit: bool = True
+    ) -> None:
+        """Enable or disable the charger's internet connectivity.
+
+        ``commit`` applies the change, which **restarts the charger** and
+        ends any session in progress. Pass ``commit=False`` to write it now
+        and apply it later, with other changes, via :meth:`async_commit`.
+        """
+        await self._write_frames(
+            [build_write_uint(Register.INTERNET_CONNECTIVITY, int(enabled))]
         )
-        await self._request(
-            build_write_string(Register.OCPP_CHARGE_POINT_ID, config.charge_point_id),
-            Register.OCPP_CHARGE_POINT_ID,
-        )
+        await self._commit_if(commit)
+
+    async def async_commit(self) -> None:
+        """Apply pending configuration, restarting the charger to do it.
+
+        .. warning::
+           Applying configuration **restarts the charger**, about eleven
+           seconds later. Any session in progress ends, and the BLE link drops
+           and has to be re-established. The charger reports
+           :attr:`ChargerState.BOOTING` while it comes back and refuses control
+           commands until it has.
+
+        Every setter takes a ``commit`` argument, so the usual way to reach
+        this is to turn that off and batch instead: write several settings,
+        then apply them together in one restart::
+
+            await charger.async_set_timezone(1, 0, commit=False)
+            await charger.async_set_random_delay(600, commit=False)
+            await charger.async_commit()
+
+        Settings written without a commit are held by the charger, not lost,
+        but they do not take effect until this is called.
+        """
+        await self._write_frames([build_commit()])
+
+    async def _commit_if(self, commit: bool) -> None:
+        """Apply pending configuration when the caller asked for it."""
+        if commit:
+            await self.async_commit()
+
+    async def async_reboot(self) -> None:
+        """Restart the charger.
+
+        Useful for recovering from a state that will not clear itself, such as
+        :attr:`ChargerState.FAULT`, without touching physical power. A vehicle
+        mid-session is interrupted.
+
+        This is the same operation as :meth:`async_commit`: the charger has one
+        frame for both, so applying configuration and restarting cannot be
+        asked for separately.
+        """
+        await self.async_commit()
 
     async def async_get_history(
         self, count: int = DEFAULT_HISTORY_COUNT

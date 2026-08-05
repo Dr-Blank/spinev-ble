@@ -13,7 +13,7 @@ from typing import Any, cast
 import pytest
 from bleak.backends.device import BLEDevice
 
-from spinev_ble.const import FRAME_HEADER, Operation
+from spinev_ble.const import FRAME_HEADER, Operation, Register
 
 #: Stand-in for a scanned device. The client only ever hands it to the
 #: transport, so nothing about it needs to be real.
@@ -95,6 +95,9 @@ class FakeTransport:
         payload = self.replies.get(register)
         if payload is not None:
             self.notify(payload)
+            return
+        if register in _ECHO_REGISTERS:
+            self.notify(frame)
 
     def notify(self, payload: bytes) -> None:
         """Deliver a notification exactly as bleak would."""
@@ -104,6 +107,10 @@ class FakeTransport:
 
 #: Registers whose reads stream records rather than answering with one frame.
 _BULK_REGISTERS = frozenset({0x68, 0x70})
+
+#: Registers a charger answers by echoing the written frame back unchanged.
+#: A test that wants a refusal scripts an entry in ``replies`` instead.
+_ECHO_REGISTERS = frozenset({Register.CONTROL})
 
 
 @pytest.fixture
