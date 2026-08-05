@@ -478,11 +478,12 @@ class SpinEvCharger:
         guard: always read :meth:`async_get_current_limit` back to confirm what
         the charger actually accepted.
 
-        ``commit`` defaults to off here, unlike the other setters. Committing
-        restarts the charger, which would end the very session the new limit
-        was meant to apply to, so a limit change is left uncommitted and takes
-        effect on the running session. Pass ``commit=True`` only if the limit
-        needs to survive a power cycle and losing the session is acceptable.
+        ``commit`` defaults to off here, unlike the other setters, and there is
+        normally no reason to turn it on. The limit is stored as soon as it is
+        written: it survives a power cycle with no commit at all. Committing
+        restarts the charger, so it would cost a session and gain nothing. The
+        argument exists only so a limit change can be folded into a batch that
+        is being committed for some other setting's sake.
 
         :raises SpinEvValueError: if ``amps`` is outside the accepted range.
         :raises SpinEvBusyError: if a session is running and

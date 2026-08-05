@@ -314,3 +314,42 @@ class TestChargerStateCoverage:
         assert not ChargerState.BOOTING.has_vehicle
         assert not ChargerState.UNAVAILABLE.has_vehicle
         assert not ChargerState.BOOTING.is_charging
+
+
+class TestPublicExports:
+    """The package root must actually expose what its docs point callers at."""
+
+    def test_everything_in_all_is_importable(self) -> None:
+        import spinev_ble
+
+        missing = [n for n in spinev_ble.__all__ if not hasattr(spinev_ble, n)]
+        assert missing == []
+
+    def test_constants_named_in_docstrings_are_exported(self) -> None:
+        """A docstring citing a constant is a promise the caller can reach it."""
+        import re
+        from pathlib import Path
+
+        import spinev_ble
+
+        source = Path(spinev_ble.__file__).parent
+        cited: set[str] = set()
+        for path in source.glob("*.py"):
+            cited |= set(
+                re.findall(
+                    r":data:`~spinev_ble\.const\.([A-Z_0-9]+)`", path.read_text()
+                )
+            )
+        assert cited, "expected the package to cite some constants"
+        assert sorted(cited - set(spinev_ble.__all__)) == []
+
+    def test_string_field_widths_are_reachable(self) -> None:
+        """build_string_write is public, so its field_bytes values must be too."""
+        import spinev_ble
+
+        for name in (
+            "WIFI_FIELD_BYTES",
+            "OCPP_ID_FIELD_BYTES",
+            "OCPP_TEXT_FIELD_BYTES",
+        ):
+            assert name in spinev_ble.__all__
