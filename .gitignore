@@ -22,6 +22,7 @@ htmlcov/
 # can be re-included. Git cannot un-ignore a file inside an ignored directory.
 .vscode/*
 !.vscode/extensions.json
+!.vscode/tasks.json
 *.swp
 .DS_Store
 

@@ -1,0 +1,53 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "bumpType",
+      "type": "pickString",
+      "description": "Version part to bump",
+      "options": ["patch", "minor", "major"],
+      "default": "patch"
+    },
+    {
+      "id": "releaseTag",
+      "type": "promptString",
+      "description": "Release tag to (re)publish, e.g. v1.2.3 (leave blank to build the current branch)",
+      "default": ""
+    }
+  ],
+  "tasks": [
+    {
+      "label": "Release: Bump Version & Tag",
+      "detail": "Bumps pyproject.toml/uv.lock version, commits, and creates the vX.Y.Z tag locally.",
+      "type": "shell",
+      "command": "./scripts/release.sh ${input:bumpType}",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "Release: Push Tags to Origin",
+      "detail": "Pushes the commit and tag, triggering the release + PyPI publish workflows.",
+      "type": "shell",
+      "command": "git push --follow-tags",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "Release: Publish Now (manual dispatch)",
+      "detail": "Manually (re)triggers the publish-to-PyPI workflow, e.g. if CI failed.",
+      "type": "shell",
+      "command": "gh workflow run publish.yaml -f tag=${input:releaseTag}",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    }
+  ]
+}
