@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# editor settings are personal; shared formatting lives in .editorconfig and
+# the tool configuration in pyproject.toml
+.idea/
+# .vscode/* rather than .vscode/, so the shared extension recommendations below
+# can be re-included. Git cannot un-ignore a file inside an ignored directory.
+.vscode/*
+!.vscode/extensions.json
+*.swp
+.DS_Store
+
+# never commit charger credentials or captures
+*.btsnoop
+btsnoop_hci.log
+secrets.py
+.env
