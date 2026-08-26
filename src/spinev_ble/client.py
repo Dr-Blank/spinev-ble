@@ -39,14 +39,17 @@ from .exceptions import (
     SpinEvValueError,
 )
 from .models import (
+    AlarmDef,
     ChargerStatus,
     ChargingSession,
     LoadBalancingConfig,
     OcppConfig,
 )
 from .protocol import (
+    ALARM_BANKS,
     VALUE_LENGTH,
     VALUE_OFFSET,
+    build_alarm_read,
     build_clock_date,
     build_clock_time,
     build_commit,
@@ -57,7 +60,7 @@ from .protocol import (
     build_write_float,
     build_write_uint,
     check_control_reply,
-    decode_alarms,
+    decode_alarm_defs,
     decode_energy,
     decode_firmware_version,
     decode_float,
@@ -391,13 +394,37 @@ class SpinEvCharger:
         """Read the charging current limit in amps."""
         return decode_float(await self.async_read_raw(Register.CURRENT_LIMIT))
 
-    async def async_get_alarms(self) -> list[str]:
-        """Read active alarms.
+    async def _async_read_alarm_word(self, bank: int) -> int:
+        """Read one alarm word as a plain integer."""
+        payload = await self._request(build_alarm_read(bank), Register.ALARMS)
+        value = payload[VALUE_OFFSET : VALUE_OFFSET + VALUE_LENGTH]
+        if len(value) != VALUE_LENGTH:
+            raise SpinEvProtocolError(
+                f"short alarm reply for bank {bank}: {len(value)} value bytes, "
+                f"expected {VALUE_LENGTH}"
+            )
+        return decode_uint(value)
 
-        Only the first alarm bank is read. A second bank exists, but the bit to
-        bank assignment for it is not known.
+    async def async_get_alarm_defs(self) -> list[AlarmDef]:
+        """Read the active alarms as full definitions.
+
+        Both alarm banks are read. Each :class:`~spinev_ble.models.AlarmDef`
+        carries the charger's fault code and severity where it has one. Bank 2
+        holds the three phase faults and reads clear on a single phase unit.
         """
-        return decode_alarms(decode_uint(await self.async_read_raw(Register.ALARMS)))
+        active: list[AlarmDef] = []
+        for bank in ALARM_BANKS:
+            active.extend(
+                decode_alarm_defs(await self._async_read_alarm_word(bank), bank)
+            )
+        return active
+
+    async def async_get_alarms(self) -> list[str]:
+        """Read the names of the active alarms, across both alarm banks.
+
+        Use :meth:`async_get_alarm_defs` for the fault codes and severities too.
+        """
+        return [alarm.name for alarm in await self.async_get_alarm_defs()]
 
     async def async_get_status(self) -> ChargerStatus:
         """Read everything useful in one pass.

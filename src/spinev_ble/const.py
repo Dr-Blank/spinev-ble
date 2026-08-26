@@ -123,6 +123,11 @@ class Register(IntEnum):
     """Priority mode used when several chargers share one supply."""
 
 
+ALARM_BANK2_FLAG = 0x10
+"""Flag byte that selects the second alarm bank when reading
+:attr:`Register.ALARMS`. Bank 1 is read with :attr:`Operation.READ`."""
+
+
 class ChargerState(IntEnum):
     """Values reported by :attr:`Register.STATE`.
 

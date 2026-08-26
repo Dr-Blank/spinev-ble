@@ -11,11 +11,13 @@ from datetime import datetime
 import pytest
 
 from spinev_ble import (
+    ALARMS,
     ChargerState,
     Command,
     Register,
     SpinEvPasswordError,
     SpinEvProtocolError,
+    build_alarm_read,
     build_clock_date,
     build_clock_time,
     build_commit,
@@ -25,6 +27,7 @@ from spinev_ble import (
     build_timezone,
     build_write_float,
     build_write_uint,
+    decode_alarm_defs,
     decode_alarms,
     decode_energy,
     decode_firmware_version,
@@ -211,16 +214,51 @@ class TestAlarms:
 
     def test_single_alarm(self) -> None:
         assert decode_alarms(0x000001) == ["Mains Fail"]
-        assert decode_alarms(0x020000) == ["Temperature High"]
+        assert decode_alarms(0x020000) == ["High Temperature"]
+
+    def test_vehicle_cp_fault(self) -> None:
+        assert decode_alarms(0x000040) == ["Vehicle CP Fault"]
 
     def test_multiple_alarms(self) -> None:
         alarms = decode_alarms(0x000021)
         assert "Mains Fail" in alarms
-        assert "Earth Leakage" in alarms
+        assert "DC Fault/Internal RCD" in alarms
         assert len(alarms) == 2
 
-    def test_reserved_bit_ignored(self) -> None:
-        assert decode_alarms(0x000800) == []
+    def test_unused_bit_ignored(self) -> None:
+        assert decode_alarms(1 << 18) == []
+
+    def test_bank2_is_separate(self) -> None:
+        # Bit 15 is "SPD Fail" in bank 1 but "Unexpected CP Voltage" in bank 2.
+        assert decode_alarms(1 << 15, bank=1) == ["SPD Fail"]
+        assert decode_alarms(1 << 15, bank=2) == ["Unexpected CP Voltage"]
+
+    def test_unknown_bank_is_empty(self) -> None:
+        assert decode_alarms(0xFFFFFFFF, bank=3) == []
+
+    def test_alarm_defs_carry_code_and_severity(self) -> None:
+        (defn,) = decode_alarm_defs(0x000040)
+        assert defn.name == "Vehicle CP Fault"
+        assert defn.code == "201"
+        assert defn.severity == "Major"
+        assert defn.bank == 1
+        assert defn.bit == 6
+
+    def test_alarm_defs_ordered_by_bit(self) -> None:
+        defs = decode_alarm_defs(0x000021)
+        assert [d.bit for d in defs] == [0, 5]
+
+    def test_build_alarm_read_selects_bank(self) -> None:
+        assert build_alarm_read(1) == bytes.fromhex("10ac390000000000")
+        assert build_alarm_read(2) == bytes.fromhex("10ac391000000000")
+
+    def test_build_alarm_read_rejects_bad_bank(self) -> None:
+        with pytest.raises(SpinEvProtocolError):
+            build_alarm_read(3)
+
+    def test_catalog_has_no_duplicate_bank_bit(self) -> None:
+        keys = [(a.bank, a.bit) for a in ALARMS]
+        assert len(keys) == len(set(keys))
 
 
 class TestStringRegisters:

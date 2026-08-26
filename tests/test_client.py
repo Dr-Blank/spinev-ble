@@ -229,7 +229,10 @@ class TestTelemetry:
             assert await charger.async_get_voltage() == pytest.approx(256.03, abs=0.01)
             assert await charger.async_get_current() == pytest.approx(15.05, abs=0.01)
             assert await charger.async_get_current_limit() == pytest.approx(16.0)
-            assert await charger.async_get_alarms() == ["Mains Fail", "Earth Leakage"]
+            assert await charger.async_get_alarms() == [
+                "Mains Fail",
+                "DC Fault/Internal RCD",
+            ]
 
     async def test_status_reads_every_field(
         self, transport: FakeTransport, client_class: Callable[..., Any]
@@ -249,7 +252,7 @@ class TestTelemetry:
         assert status.lifetime_energy_kwh == pytest.approx(1234.56)
         assert status.lifetime_seconds == 86400
         assert status.firmware_version == "35.24.4.32"
-        assert status.alarms == ("Mains Fail", "Earth Leakage")
+        assert status.alarms == ("Mains Fail", "DC Fault/Internal RCD")
         assert status.has_alarms
 
     async def test_status_survives_an_unknown_state(

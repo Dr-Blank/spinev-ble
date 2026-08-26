@@ -24,6 +24,32 @@ class Frame:
 
 
 @dataclass(frozen=True, slots=True)
+class AlarmDef:
+    """One entry in the charger's alarm table.
+
+    An alarm is a single bit of a single alarm word. :attr:`bank` says which
+    word and :attr:`bit` which position in it; the remaining fields are how the
+    charger presents that condition. See
+    :func:`spinev_ble.protocol.decode_alarm_defs`.
+    """
+
+    #: Which alarm word the bit belongs to, 1 or 2.
+    bank: int
+    #: Bit position within the 32 bit alarm word, 0 is least significant.
+    bit: int
+    #: Human readable label for the condition.
+    name: str
+    #: Fault code shown for this alarm, e.g. ``"201"``. Several alarms can share
+    #: one code, and some carry none, in which case this is ``None``.
+    code: str | None = None
+    #: Severity, one of ``"Critical"``, ``"Major"``, ``"Minor"`` or
+    #: ``"Warning"``, or ``None`` when the charger assigns none.
+    severity: str | None = None
+    #: Firmware constant name for the bit, ``""`` when not known.
+    constant: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ChargingSession:
     """One record from the charger's on device history.
 

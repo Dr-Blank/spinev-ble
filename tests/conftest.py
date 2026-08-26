@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from bleak.backends.device import BLEDevice
 
-from spinev_ble.const import FRAME_HEADER, Operation, Register
+from spinev_ble.const import ALARM_BANK2_FLAG, FRAME_HEADER, Operation, Register
 
 #: Stand-in for a scanned device. Its name and address are read when a
 #: connection is opened; nothing else about it needs to be real.
@@ -56,6 +56,9 @@ class FakeTransport:
         self.disconnect_calls = 0
         #: Filled in by tests before use.
         self.replies: dict[int, bytes] = {}
+        #: Replies keyed by (register, flag), for when the flag matters, such as
+        #: the two alarm banks that share one register.
+        self.replies_by_flag: dict[tuple[int, int], bytes] = {}
         self.bulk: list[bytes] = []
         #: Set to drop the link instead of answering the next write.
         self.drop_on_write = False
@@ -93,9 +96,18 @@ class FakeTransport:
     def _answer(self, frame: bytes) -> None:
         """Push whatever the scripted charger would send back."""
         register = frame[2]
-        if self.bulk and frame[3] == Operation.READ and register in _BULK_REGISTERS:
+        flag = frame[3]
+        if self.bulk and flag == Operation.READ and register in _BULK_REGISTERS:
             for record in self.bulk:
                 self.notify(record)
+            return
+        flagged = self.replies_by_flag.get((register, flag))
+        if flagged is not None:
+            self.notify(flagged)
+            return
+        if register == Register.ALARMS and flag == ALARM_BANK2_FLAG:
+            # An unscripted second alarm bank reads as all clear.
+            self.notify(reply(register, b"\x00\x00\x00\x00", flag=ALARM_BANK2_FLAG))
             return
         payload = self.replies.get(register)
         if payload is not None:

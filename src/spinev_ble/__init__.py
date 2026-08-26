@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from .const import (
     ADVERTISED_NAME_PATTERN,
+    ALARM_BANK2_FLAG,
     CHARACTERISTIC_UUID,
     CONTROL_REJECTED,
     DEFAULT_HISTORY_COUNT,
@@ -53,6 +54,7 @@ from .exceptions import (
     SpinEvValueError,
 )
 from .models import (
+    AlarmDef,
     ChargerStatus,
     ChargingSession,
     Frame,
@@ -60,7 +62,11 @@ from .models import (
     OcppConfig,
 )
 from .protocol import (
+    ALARM_BANKS,
     ALARM_BITS,
+    ALARM_BITS_BANK2,
+    ALARMS,
+    build_alarm_read,
     build_clock_date,
     build_clock_time,
     build_commit,
@@ -71,6 +77,7 @@ from .protocol import (
     build_write_float,
     build_write_uint,
     check_control_reply,
+    decode_alarm_defs,
     decode_alarms,
     decode_energy,
     decode_firmware_version,
@@ -93,7 +100,11 @@ except PackageNotFoundError:  # pragma: no cover - running from a source tree
 
 __all__ = [
     "ADVERTISED_NAME_PATTERN",
+    "ALARMS",
+    "ALARM_BANK2_FLAG",
+    "ALARM_BANKS",
     "ALARM_BITS",
+    "ALARM_BITS_BANK2",
     "CHARACTERISTIC_UUID",
     "CONTROL_REJECTED",
     "DEFAULT_HISTORY_COUNT",
@@ -107,6 +118,7 @@ __all__ = [
     "OCPP_TEXT_FIELD_BYTES",
     "SERVICE_UUID",
     "WIFI_FIELD_BYTES",
+    "AlarmDef",
     "BleakClientLike",
     "ChargerState",
     "ChargerStatus",
@@ -127,6 +139,7 @@ __all__ = [
     "SpinEvTimeoutError",
     "SpinEvValueError",
     "__version__",
+    "build_alarm_read",
     "build_clock_date",
     "build_clock_time",
     "build_commit",
@@ -137,6 +150,7 @@ __all__ = [
     "build_write_float",
     "build_write_uint",
     "check_control_reply",
+    "decode_alarm_defs",
     "decode_alarms",
     "decode_energy",
     "decode_firmware_version",
