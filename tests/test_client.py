@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 import pytest
+from bleak_retry_connector import MAX_CONNECT_ATTEMPTS
 
 from spinev_ble import (
     ChargerState,
@@ -27,7 +28,13 @@ from spinev_ble import (
 )
 from spinev_ble.client import BleakClientLike, SpinEvCharger
 
-from .conftest import FAKE_DEVICE, FakeTransport, reply, string_reply
+from .conftest import (
+    FAKE_DEVICE,
+    ConnectAttempt,
+    FakeTransport,
+    reply,
+    string_reply,
+)
 
 DUMMY_PASSWORD = 0xABCDEF
 
@@ -60,9 +67,10 @@ def make_charger(
     client_class: Callable[..., Any],
     password: int | None = DUMMY_PASSWORD,
     timeout: float = 1.0,
+    **kwargs: Any,
 ) -> SpinEvCharger:
     return SpinEvCharger(
-        FAKE_DEVICE, password, timeout=timeout, client_class=client_class
+        FAKE_DEVICE, password, timeout=timeout, client_class=client_class, **kwargs
     )
 
 
@@ -84,6 +92,45 @@ class TestTransportContract:
         # keeps narrowed from the assertion above.
         assert not transport.is_connected
         assert transport.disconnect_calls == 1
+
+    async def test_connecting_goes_through_bleak_retry_connector(
+        self, client_class: Callable[..., Any], connect_attempts: list[ConnectAttempt]
+    ) -> None:
+        """Retries and adapter handling belong to bleak-retry-connector."""
+        charger = make_charger(client_class)
+        await charger.async_connect()
+        await charger.async_disconnect()
+
+        assert len(connect_attempts) == 1
+        attempt = connect_attempts[0]
+        assert attempt.client_class is client_class
+        assert attempt.device is FAKE_DEVICE
+        assert attempt.name == FAKE_DEVICE.name
+        assert attempt.max_attempts == MAX_CONNECT_ATTEMPTS
+
+    async def test_max_attempts_is_the_caller_s_to_set(
+        self, client_class: Callable[..., Any], connect_attempts: list[ConnectAttempt]
+    ) -> None:
+        """One attempt is what a caller wanting a fast answer asks for."""
+        charger = make_charger(client_class, max_attempts=1)
+        await charger.async_connect()
+        await charger.async_disconnect()
+
+        assert connect_attempts[0].max_attempts == 1
+
+    async def test_a_failed_subscription_hands_the_link_back(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        """A connected transport the client cannot use must not keep the slot."""
+        transport.notify_error = RuntimeError("no such characteristic")
+        charger = make_charger(client_class)
+
+        with pytest.raises(SpinEvConnectionError, match="no such characteristic"):
+            await charger.async_connect()
+
+        assert not transport.is_connected
+        assert transport.disconnect_calls == 1
+        assert not charger.is_connected
 
     async def test_connect_is_idempotent(
         self, transport: FakeTransport, client_class: Callable[..., Any]

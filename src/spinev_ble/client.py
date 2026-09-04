@@ -7,10 +7,11 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 from types import TracebackType
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
+from bleak_retry_connector import MAX_CONNECT_ATTEMPTS, establish_connection
 
 from .const import (
     BULK_IDLE_TIMEOUT,
@@ -84,7 +85,7 @@ class BleakClientLike(Protocol):
     def is_connected(self) -> bool:
         """True while the link is up."""
 
-    async def connect(self) -> Any:
+    async def connect(self, **kwargs: Any) -> Any:
         """Open the link."""
 
     async def disconnect(self) -> Any:
@@ -100,8 +101,10 @@ class BleakClientLike(Protocol):
 
 
 ClientFactory = Callable[..., BleakClientLike]
-"""Builds the transport. Called with the device positionally plus ``timeout``
-and ``disconnected_callback`` keywords, so any replacement must accept those.
+"""Builds the transport. Connections go through
+:func:`bleak_retry_connector.establish_connection`, which calls this with the
+device positionally and passes ``disconnected_callback``, ``timeout``, ``pair``
+and its own markers as keywords, so any replacement must accept ``**kwargs``.
 :class:`bleak.BleakClient` and ``habluetooth.HaBleakClientWrapper`` both do."""
 
 # States in which a charging session is open, whether or not power is
@@ -130,6 +133,14 @@ _STATUS_READS: tuple[tuple[str, Register, Callable[[bytes], Any]], ...] = (
 )
 
 
+async def _async_close(client: BleakClientLike) -> None:
+    """Drop a link, ignoring a failure to close one that is already gone."""
+    try:
+        await client.disconnect()
+    except Exception as err:  # pylint: disable=broad-exception-caught
+        _LOGGER.debug("error while disconnecting: %s", err)
+
+
 class SpinEvCharger:
     """Talk to one charger.
 
@@ -153,6 +164,7 @@ class SpinEvCharger:
         *,
         timeout: float = DEFAULT_TIMEOUT,
         client_class: ClientFactory | None = None,
+        max_attempts: int = MAX_CONNECT_ATTEMPTS,
     ) -> None:
         """Create a client.
 
@@ -165,10 +177,16 @@ class SpinEvCharger:
         ``habluetooth.HaBleakClientWrapper`` to reach the charger through an
         ESPHome Bluetooth proxy. Anything matching :class:`BleakClientLike`
         works.
+
+        ``max_attempts`` caps the connection attempts made per
+        :meth:`async_connect`. The charger takes one client at a time, so a
+        caller that would rather hear straight away that the slot is taken,
+        such as a setup form, can pass 1.
         """
         self._device = device
         self._password = password
         self._timeout = timeout
+        self._max_attempts = max_attempts
         self._client_class: ClientFactory = client_class or BleakClient
         self._client: BleakClientLike | None = None
         self._lock = asyncio.Lock()
@@ -186,26 +204,32 @@ class SpinEvCharger:
         if self.is_connected:
             return
         try:
-            client = self._client_class(
+            # The factory is typed by what this library calls on it, which is
+            # looser than the class establish_connection asks for.
+            client = await establish_connection(
+                cast(type[BleakClient], self._client_class),
                 self._device,
-                timeout=self._timeout,
+                self._device.name or self._device.address,
                 disconnected_callback=self._on_disconnect,
+                max_attempts=self._max_attempts,
+                timeout=self._timeout,
             )
-            await client.connect()
+        except Exception as err:
+            raise SpinEvConnectionError(f"could not connect: {err}") from err
+        try:
             await client.start_notify(CHARACTERISTIC_UUID, self._on_notify)
         except Exception as err:
+            # The link is up but unusable, and the charger has only the one
+            # slot, so it goes back before the failure is reported.
+            await _async_close(client)
             raise SpinEvConnectionError(f"could not connect: {err}") from err
         self._client = client
 
     async def async_disconnect(self) -> None:
         """Drop the link. Safe to call when already disconnected."""
         client, self._client = self._client, None
-        if client is None:
-            return
-        try:
-            await client.disconnect()
-        except Exception as err:  # pylint: disable=broad-exception-caught
-            _LOGGER.debug("error while disconnecting: %s", err)
+        if client is not None:
+            await _async_close(client)
 
     async def __aenter__(self) -> SpinEvCharger:
         await self.async_connect()

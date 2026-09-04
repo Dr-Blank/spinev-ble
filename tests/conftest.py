@@ -8,16 +8,17 @@ which is what :class:`spinev_ble.client.BleakClientLike` describes.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import Any
 
 import pytest
 from bleak.backends.device import BLEDevice
 
 from spinev_ble.const import FRAME_HEADER, Operation, Register
 
-#: Stand-in for a scanned device. The client only ever hands it to the
-#: transport, so nothing about it needs to be real.
-FAKE_DEVICE = cast(BLEDevice, object())
+#: Stand-in for a scanned device. Its name and address are read when a
+#: connection is opened; nothing else about it needs to be real.
+FAKE_DEVICE = BLEDevice("AA:BB:CC:DD:EE:FF", "000000000000_ABCD", None)
 
 
 def reply(register: int, value: bytes, flag: int = Operation.READ) -> bytes:
@@ -58,6 +59,8 @@ class FakeTransport:
         self.bulk: list[bytes] = []
         #: Set to drop the link instead of answering the next write.
         self.drop_on_write = False
+        #: Set to fail the notification subscription that follows a connect.
+        self.notify_error: Exception | None = None
 
     async def connect(self, **_kwargs: Any) -> None:
         self.connect_calls += 1
@@ -70,6 +73,8 @@ class FakeTransport:
     async def start_notify(
         self, _char: object, callback: Callable[[object, bytearray], None], **_kw: Any
     ) -> None:
+        if self.notify_error is not None:
+            raise self.notify_error
         self.notify_callback = callback
 
     async def write_gatt_char(
@@ -130,3 +135,45 @@ def client_class(transport: FakeTransport) -> Callable[..., Any]:
         return transport
 
     return factory
+
+
+@dataclass
+class ConnectAttempt:
+    """What the client asked bleak-retry-connector to open."""
+
+    client_class: Callable[..., Any]
+    device: object
+    name: str
+    max_attempts: int
+    kwargs: dict[str, Any]
+
+
+@pytest.fixture(autouse=True)
+def connect_attempts(monkeypatch: pytest.MonkeyPatch) -> list[ConnectAttempt]:
+    """Stand in for bleak-retry-connector, which reaches for D-Bus on Linux.
+
+    Builds the transport through the injected factory and connects it, the way
+    the real one does, and records the call so a test can check the arguments.
+    """
+    attempts: list[ConnectAttempt] = []
+
+    async def establish_connection(
+        client_class: Callable[..., Any],
+        device: object,
+        name: str,
+        *,
+        disconnected_callback: Callable[[Any], None] | None = None,
+        max_attempts: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        attempts.append(
+            ConnectAttempt(client_class, device, name, max_attempts, dict(kwargs))
+        )
+        client = client_class(
+            device, disconnected_callback=disconnected_callback, **kwargs
+        )
+        await client.connect()
+        return client
+
+    monkeypatch.setattr("spinev_ble.client.establish_connection", establish_connection)
+    return attempts
