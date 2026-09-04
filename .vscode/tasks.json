@@ -31,7 +31,7 @@
       "label": "Release: Push Tags to Origin",
       "detail": "Pushes the commit and tag, triggering the release + PyPI publish workflows.",
       "type": "shell",
-      "command": "git push --follow-tags",
+      "command": "git push --follow-tags origin main",
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",
