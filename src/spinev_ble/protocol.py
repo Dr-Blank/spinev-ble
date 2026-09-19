@@ -23,6 +23,7 @@ from datetime import datetime
 
 from .const import (
     ALARM_BANK2_FLAG,
+    ALARM_BANKS,
     COMMIT_VALUE,
     CONTROL_REJECTED,
     ENERGY_SCALE,
@@ -33,6 +34,7 @@ from .const import (
     RECORD_START_MARKER,
     SESSION_RECORD_LENGTH,
     YEAR_EPOCH,
+    AlarmSeverity,
     Command,
     Operation,
     Register,
@@ -53,8 +55,11 @@ VALUE_OFFSET = 4
 # The password occupies the low three bytes of the control value.
 _PASSWORD_MAX = 0xFFFFFF
 
-#: The two alarm words the charger keeps on :attr:`Register.ALARMS`.
-ALARM_BANKS = (1, 2)
+# Short names, so one alarm stays on one line in the table below.
+_CRIT = AlarmSeverity.CRITICAL
+_MAJ = AlarmSeverity.MAJOR
+_MIN = AlarmSeverity.MINOR
+_WARN = AlarmSeverity.WARNING
 
 ALARMS: tuple[AlarmDef, ...] = (
     # Bank 1. Bits 18 to 24 are unused; bits 25 to 31 are configuration change
@@ -63,49 +68,49 @@ ALARMS: tuple[AlarmDef, ...] = (
     AlarmDef(1, 1, "Mains Low", constant="MAINS_LOW"),
     AlarmDef(1, 2, "Mains High", constant="MAINS_HIGH"),
     AlarmDef(1, 3, "Mains Output Current High", constant="MAINS_OP_CURRENT_HIGH"),
-    AlarmDef(1, 4, "Earth Wire Open", "301", "Major", "EARTH_DETECT"),
-    AlarmDef(1, 5, "DC Fault/Internal RCD", "103", "Critical", "EARTH_LEAKAGE"),
-    AlarmDef(1, 6, "Vehicle CP Fault", "201", "Major", "PWM_FAULT"),
+    AlarmDef(1, 4, "Earth Wire Open", "301", _MAJ, "EARTH_DETECT"),
+    AlarmDef(1, 5, "DC Fault/Internal RCD", "103", _CRIT, "EARTH_LEAKAGE"),
+    AlarmDef(1, 6, "Vehicle CP Fault", "201", _MAJ, "PWM_FAULT"),
     AlarmDef(1, 7, "EM Comm Fault", "401", None, "EM_COMM_FAULT"),
-    AlarmDef(1, 8, "RFID Fault", "403", "Warning", "RFID_COMM_FAULT"),
-    AlarmDef(1, 9, "WiFi Fault", "402", "Warning", "WIFI_BLE_COMM_FAULT"),
+    AlarmDef(1, 8, "RFID Fault", "403", _WARN, "RFID_COMM_FAULT"),
+    AlarmDef(1, 9, "WiFi Fault", "402", _WARN, "WIFI_BLE_COMM_FAULT"),
     AlarmDef(1, 10, "LCD Board Comm Fault"),
     AlarmDef(1, 11, "LED Board Comm Fault"),
-    AlarmDef(1, 12, "NE High Voltage", "301", "Major", "NE_VOLT_HIGH"),
+    AlarmDef(1, 12, "NE High Voltage", "301", _MAJ, "NE_VOLT_HIGH"),
     AlarmDef(
         1, 13, "Output Current Very High", "302", None, "OUTPUT_CURRENT_VERY_HIGH"
     ),
-    AlarmDef(1, 14, "Emergency Pressed", "101", "Critical", "EMERGENCY_DETECT"),
+    AlarmDef(1, 14, "Emergency Pressed", "101", _CRIT, "EMERGENCY_DETECT"),
     AlarmDef(1, 15, "SPD Fail"),
     AlarmDef(1, 16, "Mains Very High", "303", None, "MAINS_VERY_HIGH"),
-    AlarmDef(1, 17, "High Temperature", "104", "Major", "TEMPERATURE_HIGH"),
+    AlarmDef(1, 17, "High Temperature", "104", _MAJ, "TEMPERATURE_HIGH"),
     # Bank 2. Three phase and peripheral faults, all clear on a single phase
     # unit. Read with :data:`spinev_ble.const.ALARM_BANK2_FLAG`.
-    AlarmDef(2, 0, "L1 Phase Failure", "303", "Major", "MAINS_RPH_FAIL"),
-    AlarmDef(2, 1, "L1 Voltage Low", "303", "Major", "MAINS_RPH_LOW"),
-    AlarmDef(2, 2, "L1 Voltage High", "303", "Major", "MAINS_RPH_HIGH"),
-    AlarmDef(2, 3, "L2 Phase Failure", "303", "Major", "MAINS_YPH_FAIL"),
-    AlarmDef(2, 4, "L2 Voltage Low", "303", "Major", "MAINS_YPH_LOW"),
-    AlarmDef(2, 5, "L2 Voltage High", "303", "Major", "MAINS_YPH_HIGH"),
-    AlarmDef(2, 6, "L3 Phase Failure", "303", "Major", "MAINS_BPH_FAIL"),
-    AlarmDef(2, 7, "L3 Voltage Low", "303", "Major", "MAINS_BPH_LOW"),
-    AlarmDef(2, 8, "L3 Voltage High", "303", "Major", "MAINS_BPH_HIGH"),
-    AlarmDef(2, 9, "L1 Overcurrent", "302", "Critical", "OP_CURRENT_R_HIGH"),
-    AlarmDef(2, 10, "L2 Overcurrent", "302", "Critical", "OP_CURRENT_Y_HIGH"),
-    AlarmDef(2, 11, "L3 Overcurrent", "302", "Critical", "OP_CURRENT_B_HIGH"),
-    AlarmDef(2, 12, "Energy Meter 1 Fault", "401", "Warning", "EM_IC_1"),
-    AlarmDef(2, 13, "Energy Meter 2 Fault", "401", "Warning", "EM_IC_2"),
+    AlarmDef(2, 0, "L1 Phase Failure", "303", _MAJ, "MAINS_RPH_FAIL"),
+    AlarmDef(2, 1, "L1 Voltage Low", "303", _MAJ, "MAINS_RPH_LOW"),
+    AlarmDef(2, 2, "L1 Voltage High", "303", _MAJ, "MAINS_RPH_HIGH"),
+    AlarmDef(2, 3, "L2 Phase Failure", "303", _MAJ, "MAINS_YPH_FAIL"),
+    AlarmDef(2, 4, "L2 Voltage Low", "303", _MAJ, "MAINS_YPH_LOW"),
+    AlarmDef(2, 5, "L2 Voltage High", "303", _MAJ, "MAINS_YPH_HIGH"),
+    AlarmDef(2, 6, "L3 Phase Failure", "303", _MAJ, "MAINS_BPH_FAIL"),
+    AlarmDef(2, 7, "L3 Voltage Low", "303", _MAJ, "MAINS_BPH_LOW"),
+    AlarmDef(2, 8, "L3 Voltage High", "303", _MAJ, "MAINS_BPH_HIGH"),
+    AlarmDef(2, 9, "L1 Overcurrent", "302", _CRIT, "OP_CURRENT_R_HIGH"),
+    AlarmDef(2, 10, "L2 Overcurrent", "302", _CRIT, "OP_CURRENT_Y_HIGH"),
+    AlarmDef(2, 11, "L3 Overcurrent", "302", _CRIT, "OP_CURRENT_B_HIGH"),
+    AlarmDef(2, 12, "Energy Meter 1 Fault", "401", _WARN, "EM_IC_1"),
+    AlarmDef(2, 13, "Energy Meter 2 Fault", "401", _WARN, "EM_IC_2"),
     AlarmDef(2, 14, "Lora Fault"),
-    AlarmDef(2, 15, "Unexpected CP Voltage", "202", "Major", "PWM_GUN_2"),
-    AlarmDef(2, 16, "Media Failure", "101", "Major", "SD_CARD_FAULT"),
+    AlarmDef(2, 15, "Unexpected CP Voltage", "202", _MAJ, "PWM_GUN_2"),
+    AlarmDef(2, 16, "Media Failure", "101", _MAJ, "SD_CARD_FAULT"),
     AlarmDef(2, 17, "Encryption IC Fault"),
-    AlarmDef(2, 18, "EEPROM Fault", "101", "Minor", "EXT_EEP_COMM_FAULT"),
-    AlarmDef(2, 19, "Ext Energy Meter Fault", "101", "Minor", "EXT_RS485_COMM_FAULT"),
-    AlarmDef(2, 20, "Relay Stuck", "102", "Critical", "WELD_DETECTION_FAULT"),
+    AlarmDef(2, 18, "EEPROM Fault", "101", _MIN, "EXT_EEP_COMM_FAULT"),
+    AlarmDef(2, 19, "Ext Energy Meter Fault", "101", _MIN, "EXT_RS485_COMM_FAULT"),
+    AlarmDef(2, 20, "Relay Stuck", "102", _CRIT, "WELD_DETECTION_FAULT"),
     AlarmDef(2, 21, "Servo Lock Fail"),
     AlarmDef(2, 22, "Grid Max Current Reached"),
     AlarmDef(2, 23, "Charger Min Current Reached"),
-    AlarmDef(2, 24, "GSM Fault", "402", "Warning", "GSM_COMM_FAULT"),
+    AlarmDef(2, 24, "GSM Fault", "402", _WARN, "GSM_COMM_FAULT"),
     AlarmDef(2, 25, "Charger Zero Current"),
 )
 """Every alarm the charger can report, both banks. Each :class:`AlarmDef`
@@ -380,14 +385,27 @@ def is_history_record(data: bytes) -> bool:
     )
 
 
+def _check_bank(bank: int) -> None:
+    """Reject an alarm bank the charger does not have.
+
+    A word never names its own bank, so nothing can recover a wrong one later;
+    the same check guards decoding and frame building alike.
+
+    :raises SpinEvProtocolError: if ``bank`` is not in :data:`ALARM_BANKS`.
+    """
+    if bank not in ALARM_BANKS:
+        raise SpinEvProtocolError(f"alarm bank must be 1 or 2, not {bank!r}")
+
+
 def decode_alarm_defs(word: int, bank: int = 1) -> list[AlarmDef]:
     """Return the alarms active in one alarm word, as full definitions.
 
     :param word: the 32 bit alarm word read from :attr:`Register.ALARMS`.
-    :param bank: which alarm word it is, 1 or 2. An unknown bank yields no
-        alarms rather than raising, since a word never names its own bank.
+    :param bank: which alarm word it is, 1 or 2.
+    :raises SpinEvProtocolError: if ``bank`` is neither 1 nor 2.
     """
-    defs = _ALARM_DEFS_BY_BANK.get(bank, {})
+    _check_bank(bank)
+    defs = _ALARM_DEFS_BY_BANK[bank]
     return [defs[bit] for bit in sorted(defs) if word & (1 << bit)]
 
 
@@ -396,6 +414,8 @@ def decode_alarms(word: int, bank: int = 1) -> list[str]:
 
     ``bank`` selects which alarm word ``word`` came from, 1 or 2. See
     :func:`decode_alarm_defs` for the codes and severities as well.
+
+    :raises SpinEvProtocolError: if ``bank`` is neither 1 nor 2.
     """
     return [alarm.name for alarm in decode_alarm_defs(word, bank)]
 
@@ -408,12 +428,9 @@ def build_alarm_read(bank: int = 1) -> bytes:
 
     :raises SpinEvProtocolError: if ``bank`` is neither 1 nor 2.
     """
+    _check_bank(bank)
     if bank == 1:
         return build_read(Register.ALARMS)
-    if bank == 2:
-        return (
-            FRAME_HEADER
-            + bytes([Register.ALARMS, ALARM_BANK2_FLAG])
-            + struct.pack(">I", 0)
-        )
-    raise SpinEvProtocolError(f"alarm bank must be 1 or 2, not {bank!r}")
+    return (
+        FRAME_HEADER + bytes([Register.ALARMS, ALARM_BANK2_FLAG]) + struct.pack(">I", 0)
+    )

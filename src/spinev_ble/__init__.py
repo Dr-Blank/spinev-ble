@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from .const import (
     ADVERTISED_NAME_PATTERN,
     ALARM_BANK2_FLAG,
+    ALARM_BANKS,
     CHARACTERISTIC_UUID,
     CONTROL_REJECTED,
     DEFAULT_HISTORY_COUNT,
@@ -38,6 +39,7 @@ from .const import (
     OCPP_TEXT_FIELD_BYTES,
     SERVICE_UUID,
     WIFI_FIELD_BYTES,
+    AlarmSeverity,
     ChargerState,
     Command,
     Operation,
@@ -62,7 +64,6 @@ from .models import (
     OcppConfig,
 )
 from .protocol import (
-    ALARM_BANKS,
     ALARM_BITS,
     ALARM_BITS_BANK2,
     ALARMS,
@@ -119,6 +120,7 @@ __all__ = [
     "SERVICE_UUID",
     "WIFI_FIELD_BYTES",
     "AlarmDef",
+    "AlarmSeverity",
     "BleakClientLike",
     "ChargerState",
     "ChargerStatus",

@@ -14,6 +14,8 @@ import pytest
 from bleak_retry_connector import MAX_CONNECT_ATTEMPTS
 
 from spinev_ble import (
+    ALARM_BANK2_FLAG,
+    AlarmSeverity,
     ChargerState,
     LoadBalancingConfig,
     OcppConfig,
@@ -233,6 +235,62 @@ class TestTelemetry:
                 "Mains Fail",
                 "DC Fault/Internal RCD",
             ]
+
+    async def test_alarms_span_both_banks(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        """Bits from the second alarm word reach the caller too.
+
+        Bit 15 is set in both words, and decodes to a different name in each,
+        so this also pins each word to its own half of the table.
+        """
+        transport.replies = dict(STATUS_REPLIES)
+        transport.replies_by_flag[(Register.ALARMS, ALARM_BANK2_FLAG)] = reply(
+            Register.ALARMS, bytes.fromhex("00008200"), flag=ALARM_BANK2_FLAG
+        )
+        async with make_charger(client_class) as charger:
+            assert await charger.async_get_alarms() == [
+                "Mains Fail",
+                "DC Fault/Internal RCD",
+                "L1 Overcurrent",
+                "Unexpected CP Voltage",
+            ]
+
+    async def test_alarm_defs_reach_the_caller_with_bank_and_severity(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        transport.replies = dict(STATUS_REPLIES)
+        transport.replies_by_flag[(Register.ALARMS, ALARM_BANK2_FLAG)] = reply(
+            Register.ALARMS, bytes.fromhex("00000200"), flag=ALARM_BANK2_FLAG
+        )
+        async with make_charger(client_class) as charger:
+            defs = await charger.async_get_alarm_defs()
+        assert [(d.bank, d.bit) for d in defs] == [(1, 0), (1, 5), (2, 9)]
+        assert defs[-1].name == "L1 Overcurrent"
+        assert defs[-1].severity is AlarmSeverity.CRITICAL
+        assert defs[-1].code == "302"
+
+    async def test_alarms_ignore_an_all_clear_second_bank(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        """The unscripted bank 2 the fake answers with reads as no alarms."""
+        transport.replies = dict(STATUS_REPLIES)
+        async with make_charger(client_class) as charger:
+            assert await charger.async_get_alarms() == [
+                "Mains Fail",
+                "DC Fault/Internal RCD",
+            ]
+
+    async def test_short_alarm_reply_is_rejected(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        transport.replies = dict(STATUS_REPLIES)
+        transport.replies_by_flag[(Register.ALARMS, ALARM_BANK2_FLAG)] = reply(
+            Register.ALARMS, b"\x00\x00", flag=ALARM_BANK2_FLAG
+        )
+        async with make_charger(client_class) as charger:
+            with pytest.raises(SpinEvProtocolError, match="short alarm reply"):
+                await charger.async_get_alarms()
 
     async def test_status_reads_every_field(
         self, transport: FakeTransport, client_class: Callable[..., Any]

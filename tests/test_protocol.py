@@ -12,6 +12,7 @@ import pytest
 
 from spinev_ble import (
     ALARMS,
+    AlarmSeverity,
     ChargerState,
     Command,
     Register,
@@ -233,16 +234,31 @@ class TestAlarms:
         assert decode_alarms(1 << 15, bank=1) == ["SPD Fail"]
         assert decode_alarms(1 << 15, bank=2) == ["Unexpected CP Voltage"]
 
-    def test_unknown_bank_is_empty(self) -> None:
-        assert decode_alarms(0xFFFFFFFF, bank=3) == []
+    def test_unknown_bank_is_rejected(self) -> None:
+        with pytest.raises(SpinEvProtocolError):
+            decode_alarms(0xFFFFFFFF, bank=3)
+        with pytest.raises(SpinEvProtocolError):
+            decode_alarm_defs(0xFFFFFFFF, bank=0)
 
     def test_alarm_defs_carry_code_and_severity(self) -> None:
         (defn,) = decode_alarm_defs(0x000040)
         assert defn.name == "Vehicle CP Fault"
         assert defn.code == "201"
-        assert defn.severity == "Major"
+        assert defn.severity is AlarmSeverity.MAJOR
+        assert defn.constant == "PWM_FAULT"
         assert defn.bank == 1
         assert defn.bit == 6
+
+    def test_severity_compares_as_its_label(self) -> None:
+        (defn,) = decode_alarm_defs(1 << 5)
+        assert defn.severity == "Critical"
+
+    def test_catalog_fields_are_well_formed(self) -> None:
+        for alarm in ALARMS:
+            assert alarm.bank in (1, 2)
+            assert alarm.name
+            assert alarm.severity is None or isinstance(alarm.severity, AlarmSeverity)
+            assert alarm.constant is None or alarm.constant.isupper()
 
     def test_alarm_defs_ordered_by_bit(self) -> None:
         defs = decode_alarm_defs(0x000021)

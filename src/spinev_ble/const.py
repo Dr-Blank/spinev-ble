@@ -5,7 +5,7 @@ No credentials or device identifiers are stored in this package.
 
 from __future__ import annotations
 
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 SERVICE_UUID = "49535343-fe7d-4ae5-8fa9-9fafd205e455"
 """Vendor service. The Microchip/ISSC "Transparent UART" service, a generic
@@ -126,6 +126,27 @@ class Register(IntEnum):
 ALARM_BANK2_FLAG = 0x10
 """Flag byte that selects the second alarm bank when reading
 :attr:`Register.ALARMS`. Bank 1 is read with :attr:`Operation.READ`."""
+
+ALARM_BANKS = (1, 2)
+"""The two alarm words the charger keeps on :attr:`Register.ALARMS`."""
+
+
+class AlarmSeverity(StrEnum):
+    """How serious the charger considers an alarm.
+
+    Members compare equal to their string value, so
+    ``alarm.severity == "Major"`` works as well as
+    ``alarm.severity is AlarmSeverity.MAJOR``.
+    """
+
+    CRITICAL = "Critical"
+    """charging is stopped and the condition is unsafe"""
+    MAJOR = "Major"
+    """charging is stopped or prevented"""
+    MINOR = "Minor"
+    """the charger keeps working with reduced function"""
+    WARNING = "Warning"
+    """a peripheral is degraded, charging is unaffected"""
 
 
 class ChargerState(IntEnum):

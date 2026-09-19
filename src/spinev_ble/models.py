@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from .const import ChargerState
+from .const import AlarmSeverity, ChargerState
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +42,13 @@ class AlarmDef:
     #: Fault code shown for this alarm, e.g. ``"201"``. Several alarms can share
     #: one code, and some carry none, in which case this is ``None``.
     code: str | None = None
-    #: Severity, one of ``"Critical"``, ``"Major"``, ``"Minor"`` or
-    #: ``"Warning"``, or ``None`` when the charger assigns none.
-    severity: str | None = None
-    #: Firmware constant name for the bit, ``""`` when not known.
-    constant: str = ""
+    #: How serious the charger considers the alarm, ``None`` when it assigns no
+    #: severity.
+    severity: AlarmSeverity | None = None
+    #: Identifier the charger's own firmware uses for the bit, useful when
+    #: matching these alarms against the app or a service tool. ``None`` for
+    #: bits the firmware names nothing for.
+    constant: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

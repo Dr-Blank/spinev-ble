@@ -14,6 +14,7 @@ from bleak.backends.device import BLEDevice
 from bleak_retry_connector import MAX_CONNECT_ATTEMPTS, establish_connection
 
 from .const import (
+    ALARM_BANKS,
     BULK_IDLE_TIMEOUT,
     CHARACTERISTIC_UUID,
     DEFAULT_HISTORY_COUNT,
@@ -46,7 +47,6 @@ from .models import (
     OcppConfig,
 )
 from .protocol import (
-    ALARM_BANKS,
     VALUE_LENGTH,
     VALUE_OFFSET,
     build_alarm_read,
