@@ -36,7 +36,9 @@ re-provisioned"), never as statements about provenance.
 
 ## Coding practices
 
-- Public names carry docstrings. Constants use `#:` comments — self-documenting.
+- Public names carry docstrings. Constants, enum members and dataclass fields
+  are documented the same way, with the string *after* the assignment, not a
+  `#:` comment before it. Editors show it on hover; `#:` they ignore.
 - Type everything. `mypy --strict` covers `src` and `tests`, must pass.
 - Raise package's own exceptions from `exceptions.py`, never bare
   `ValueError` or `RuntimeError` — callers catch `SpinEvError`.

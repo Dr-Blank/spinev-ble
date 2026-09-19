@@ -20,9 +20,9 @@ from .exceptions import SpinEvError
 
 _NAME_RE = re.compile(ADVERTISED_NAME_PATTERN)
 
-#: Read instead of ``--password`` so the credential stays out of shell history
-#: and out of the process list.
 PASSWORD_ENV_VAR = "SPINEV_BLE_PASSWORD"
+"""Read instead of ``--password`` so the credential stays out of shell history
+and out of the process list."""
 
 
 async def _scan(timeout: float) -> list[tuple[BLEDevice, str]]:  # noqa: ASYNC109

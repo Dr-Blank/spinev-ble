@@ -161,8 +161,8 @@ __all__ = [
     "parse_frame",
 ]
 
-#: Names that live in the optional bleak backed client module.
 _LAZY = frozenset({"BleakClientLike", "SpinEvCharger"})
+"""Names that live in the optional bleak backed client module."""
 
 
 def __getattr__(name: str) -> Any:

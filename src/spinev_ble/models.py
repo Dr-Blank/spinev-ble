@@ -33,22 +33,22 @@ class AlarmDef:
     :func:`spinev_ble.protocol.decode_alarm_defs`.
     """
 
-    #: Which alarm word the bit belongs to, 1 or 2.
     bank: int
-    #: Bit position within the 32 bit alarm word, 0 is least significant.
+    """Which alarm word the bit belongs to, 1 or 2."""
     bit: int
-    #: Human readable label for the condition.
+    """Bit position within the 32 bit alarm word, 0 is least significant."""
     name: str
-    #: Fault code shown for this alarm, e.g. ``"201"``. Several alarms can share
-    #: one code, and some carry none, in which case this is ``None``.
+    """Human readable label for the condition."""
     code: str | None = None
-    #: How serious the charger considers the alarm, ``None`` when it assigns no
-    #: severity.
+    """Fault code shown for this alarm, e.g. ``"201"``. Several alarms can
+    share one code, and some carry none, in which case this is ``None``."""
     severity: AlarmSeverity | None = None
-    #: Identifier the charger's own firmware uses for the bit, useful when
-    #: matching these alarms against the app or a service tool. ``None`` for
-    #: bits the firmware names nothing for.
+    """How serious the charger considers the alarm, ``None`` when it assigns
+    no severity."""
     constant: str | None = None
+    """Identifier the charger's own firmware uses for the bit, useful when
+    matching these alarms against the app or a service tool. ``None`` for bits
+    the firmware names nothing for."""
 
 
 @dataclass(frozen=True, slots=True)
