@@ -156,6 +156,10 @@ decode_alarms(1 << 15, bank=2)  # ['Unexpected CP Voltage']
 
 `ALARMS` is the whole table, both banks. Passing any bank other than 1 or 2 raises `SpinEvProtocolError`.
 
+A charger whose firmware does not answer the bank 2 read is treated as reporting no bank 2 alarms, so bank 1 still reaches the caller.
+
+Bank 1 bits 10 and 11 are separate faults, the LCD board and the LED board. Bits 18 to 24 are unused, and bits 25 to 31 are configuration change flags rather than faults, so neither range is decoded.
+
 ## Things worth knowing
 
 **Writing network settings can strand the charger.** `async_set_wifi` and `async_set_ocpp_config` change how the charger reaches the outside world. A wrong value leaves it unable to connect until it is re-provisioned. Read the values back afterwards, and keep the phone app available to restore the originals.

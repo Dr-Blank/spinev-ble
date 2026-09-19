@@ -62,6 +62,9 @@ class FakeTransport:
         self.bulk: list[bytes] = []
         #: Set to drop the link instead of answering the next write.
         self.drop_on_write = False
+        #: (register, flag) pairs the fake charger never answers, standing in
+        #: for firmware that does not implement a read.
+        self.silent: set[tuple[int, int]] = set()
         #: Set to fail the notification subscription that follows a connect.
         self.notify_error: Exception | None = None
 
@@ -97,6 +100,8 @@ class FakeTransport:
         """Push whatever the scripted charger would send back."""
         register = frame[2]
         flag = frame[3]
+        if (register, flag) in self.silent:
+            return
         if self.bulk and flag == Operation.READ and register in _BULK_REGISTERS:
             for record in self.bulk:
                 self.notify(record)

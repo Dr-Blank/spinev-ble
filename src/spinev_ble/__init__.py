@@ -64,8 +64,6 @@ from .models import (
     OcppConfig,
 )
 from .protocol import (
-    ALARM_BITS,
-    ALARM_BITS_BANK2,
     ALARMS,
     build_alarm_read,
     build_clock_date,
@@ -104,8 +102,6 @@ __all__ = [
     "ALARMS",
     "ALARM_BANK2_FLAG",
     "ALARM_BANKS",
-    "ALARM_BITS",
-    "ALARM_BITS_BANK2",
     "CHARACTERISTIC_UUID",
     "CONTROL_REJECTED",
     "DEFAULT_HISTORY_COUNT",

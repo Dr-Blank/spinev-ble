@@ -289,8 +289,44 @@ class TestTelemetry:
             Register.ALARMS, b"\x00\x00", flag=ALARM_BANK2_FLAG
         )
         async with make_charger(client_class) as charger:
-            with pytest.raises(SpinEvProtocolError, match="short alarm reply"):
+            with pytest.raises(SpinEvProtocolError, match="short reply for alarm bank"):
                 await charger.async_get_alarms()
+
+    async def test_silent_second_bank_still_yields_bank_one(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        """Firmware that ignores the bank 2 flag must not break the read.
+
+        The bank 2 read times out. Bank 1's faults still reach the caller
+        rather than the whole call failing.
+        """
+        transport.replies = dict(STATUS_REPLIES)
+        transport.silent.add((Register.ALARMS, ALARM_BANK2_FLAG))
+        async with make_charger(client_class, timeout=0.05) as charger:
+            assert await charger.async_get_alarms() == [
+                "Mains Fail",
+                "DC Fault/Internal RCD",
+            ]
+
+    async def test_silent_first_bank_still_raises(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        """Only bank 2 is treated as optional."""
+        transport.replies = dict(STATUS_REPLIES)
+        transport.silent.add((Register.ALARMS, Operation.READ))
+        async with make_charger(client_class, timeout=0.05) as charger:
+            with pytest.raises(SpinEvTimeoutError):
+                await charger.async_get_alarms()
+
+    async def test_status_survives_a_silent_second_bank(
+        self, transport: FakeTransport, client_class: Callable[..., Any]
+    ) -> None:
+        """The whole status read keeps working on such firmware."""
+        transport.replies = dict(STATUS_REPLIES)
+        transport.silent.add((Register.ALARMS, ALARM_BANK2_FLAG))
+        async with make_charger(client_class, timeout=0.05) as charger:
+            status = await charger.async_get_status()
+        assert status.alarms == ("Mains Fail", "DC Fault/Internal RCD")
 
     async def test_status_reads_every_field(
         self, transport: FakeTransport, client_class: Callable[..., Any]

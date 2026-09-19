@@ -127,17 +127,6 @@ def _index_alarms() -> dict[int, dict[int, AlarmDef]]:
 
 _ALARM_DEFS_BY_BANK = _index_alarms()
 
-ALARM_BITS: dict[int, str] = {
-    1 << alarm.bit: alarm.name for alarm in ALARMS if alarm.bank == 1
-}
-"""Bank 1 alarm bit mask to name. :data:`ALARMS` holds the full table, both
-banks, with fault codes and severities; :func:`decode_alarms` reads a word."""
-
-ALARM_BITS_BANK2: dict[int, str] = {
-    1 << alarm.bit: alarm.name for alarm in ALARMS if alarm.bank == 2
-}
-"""Bank 2 alarm bit mask to name."""
-
 
 def _check_password(password: int) -> None:
     if not isinstance(password, int) or isinstance(password, bool):
@@ -146,15 +135,17 @@ def _check_password(password: int) -> None:
         raise SpinEvPasswordError(f"password must fit in three bytes, got {password!r}")
 
 
-def build_read(register: int, parameter: int = 0) -> bytes:
+def build_read(register: int, parameter: int = 0, flag: int = Operation.READ) -> bytes:
     """Build a read request.
 
     ``parameter`` is zero for ordinary registers. The bulk history registers
     use it as a record count.
+
+    ``flag`` is the frame's flag byte. It is :attr:`Operation.READ` for every
+    ordinary register; the second alarm bank is the one read that overrides it,
+    with :data:`~spinev_ble.const.ALARM_BANK2_FLAG`.
     """
-    return (
-        FRAME_HEADER + bytes([register, Operation.READ]) + struct.pack(">I", parameter)
-    )
+    return FRAME_HEADER + bytes([register, flag]) + struct.pack(">I", parameter)
 
 
 def build_write_uint(register: int, value: int) -> bytes:
@@ -431,6 +422,4 @@ def build_alarm_read(bank: int = 1) -> bytes:
     _check_bank(bank)
     if bank == 1:
         return build_read(Register.ALARMS)
-    return (
-        FRAME_HEADER + bytes([Register.ALARMS, ALARM_BANK2_FLAG]) + struct.pack(">I", 0)
-    )
+    return build_read(Register.ALARMS, flag=ALARM_BANK2_FLAG)
