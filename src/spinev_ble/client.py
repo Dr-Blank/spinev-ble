@@ -14,6 +14,7 @@ from bleak.backends.device import BLEDevice
 from bleak_retry_connector import MAX_CONNECT_ATTEMPTS, establish_connection
 
 from .const import (
+    ALARM_BANKS,
     BULK_IDLE_TIMEOUT,
     CHARACTERISTIC_UUID,
     DEFAULT_HISTORY_COUNT,
@@ -39,6 +40,7 @@ from .exceptions import (
     SpinEvValueError,
 )
 from .models import (
+    AlarmDef,
     ChargerStatus,
     ChargingSession,
     LoadBalancingConfig,
@@ -47,6 +49,7 @@ from .models import (
 from .protocol import (
     VALUE_LENGTH,
     VALUE_OFFSET,
+    build_alarm_read,
     build_clock_date,
     build_clock_time,
     build_commit,
@@ -57,7 +60,7 @@ from .protocol import (
     build_write_float,
     build_write_uint,
     check_control_reply,
-    decode_alarms,
+    decode_alarm_defs,
     decode_energy,
     decode_firmware_version,
     decode_float,
@@ -139,6 +142,22 @@ async def _async_close(client: BleakClientLike) -> None:
         await client.disconnect()
     except Exception as err:  # pylint: disable=broad-exception-caught
         _LOGGER.debug("error while disconnecting: %s", err)
+
+
+def _value_bytes(payload: bytes, label: str) -> bytes:
+    """Take the four value bytes out of a reply.
+
+    ``label`` names what was being read, for the error message.
+
+    :raises SpinEvProtocolError: if the reply is too short to hold a value.
+    """
+    value = payload[VALUE_OFFSET : VALUE_OFFSET + VALUE_LENGTH]
+    if len(value) != VALUE_LENGTH:
+        raise SpinEvProtocolError(
+            f"short reply for {label}: {len(value)} value bytes, "
+            f"expected {VALUE_LENGTH}"
+        )
+    return value
 
 
 class SpinEvCharger:
@@ -341,13 +360,7 @@ class SpinEvCharger:
     async def async_read_raw(self, register: int, parameter: int = 0) -> bytes:
         """Read a register and return its four raw value bytes."""
         payload = await self._request(build_read(register, parameter), register)
-        value = payload[VALUE_OFFSET : VALUE_OFFSET + VALUE_LENGTH]
-        if len(value) != VALUE_LENGTH:
-            raise SpinEvProtocolError(
-                f"short reply for register 0x{register:02X}: "
-                f"{len(value)} value bytes, expected {VALUE_LENGTH}"
-            )
-        return value
+        return _value_bytes(payload, f"register 0x{register:02X}")
 
     async def async_read_string(self, register: int) -> str:
         """Read a text register and return it decoded, padding stripped.
@@ -391,13 +404,41 @@ class SpinEvCharger:
         """Read the charging current limit in amps."""
         return decode_float(await self.async_read_raw(Register.CURRENT_LIMIT))
 
-    async def async_get_alarms(self) -> list[str]:
-        """Read active alarms.
+    async def _async_read_alarm_word(self, bank: int) -> int:
+        """Read one alarm word as a plain integer."""
+        payload = await self._request(build_alarm_read(bank), Register.ALARMS)
+        return decode_uint(_value_bytes(payload, f"alarm bank {bank}"))
 
-        Only the first alarm bank is read. A second bank exists, but the bit to
-        bank assignment for it is not known.
+    async def async_get_alarm_defs(self) -> list[AlarmDef]:
+        """Read the active alarms as full definitions.
+
+        Both alarm banks are read. Each :class:`~spinev_ble.models.AlarmDef`
+        carries the charger's fault code and severity where it has one. Bank 2
+        holds the three phase faults and reads clear on a single phase unit.
+
+        A charger that never answers the bank 2 read is treated as reporting
+        no bank 2 alarms, so the bank 1 faults still reach the caller. Bank 1
+        going unanswered raises :class:`SpinEvTimeoutError` as any other read
+        does.
         """
-        return decode_alarms(decode_uint(await self.async_read_raw(Register.ALARMS)))
+        active: list[AlarmDef] = []
+        for bank in ALARM_BANKS:
+            try:
+                word = await self._async_read_alarm_word(bank)
+            except SpinEvTimeoutError:
+                if bank == 1:
+                    raise
+                _LOGGER.debug("no reply to the bank %d alarm read", bank)
+                continue
+            active.extend(decode_alarm_defs(word, bank))
+        return active
+
+    async def async_get_alarms(self) -> list[str]:
+        """Read the names of the active alarms, across both alarm banks.
+
+        Use :meth:`async_get_alarm_defs` for the fault codes and severities too.
+        """
+        return [alarm.name for alarm in await self.async_get_alarm_defs()]
 
     async def async_get_status(self) -> ChargerStatus:
         """Read everything useful in one pass.

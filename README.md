@@ -127,13 +127,38 @@ Treat it as a credential: do not commit it, and do not paste it into an issue.
 | Lifetime energy and duration | `0x65`, `0x6A` | `async_get_status` |
 | Charging history | `0x68` | `async_get_history` |
 | Firmware version | `0x52` | `async_get_status` |
-| Active alarms | `0x39` | `async_get_alarms` |
+| Active alarms | `0x39` | `async_get_alarms`, `async_get_alarm_defs` |
 | Charging current limit | `0x4F` | `async_get_current_limit`, `async_set_current_limit` |
 | Charger password | `0x32` | `async_get_password` |
 | WiFi settings | `0x61`, `0x63` | `async_get_wifi_ssid`, `async_set_wifi` |
 | OCPP settings | `0x5E`, `0x60`, `0x62`, `0x64` | `async_get_ocpp_config`, `async_set_ocpp_config` |
 
-Only the first alarm bank is decoded. A second bank exists, but its bit assignments are not known.
+### Alarms
+
+The charger keeps its alarms in two 32 bit words on register `0x39`. Both are read: the first like any register, the second with `ALARM_BANK2_FLAG` in the flag byte. `async_get_alarms` returns the names from both, and `async_get_alarm_defs` returns `AlarmDef` entries carrying the charger's own fault code, severity and firmware constant as well.
+
+```python
+for alarm in await charger.async_get_alarm_defs():
+    print(alarm.name, alarm.code, alarm.severity)  # L1 Overcurrent 302 Critical
+```
+
+`severity` is an `AlarmSeverity` (`Critical`, `Major`, `Minor`, `Warning`) or `None` where the charger assigns none. It is a `StrEnum`, so it compares equal to its label.
+
+The second word holds the three phase and peripheral faults; it reads all clear on a single phase unit. The same bit means different things in each word, so a word must be decoded against its own bank:
+
+```python
+from spinev_ble import ALARMS, build_alarm_read, decode_alarms
+
+build_alarm_read(2).hex()  # '10ac391000000000'
+decode_alarms(1 << 15, bank=1)  # ['SPD Fail']
+decode_alarms(1 << 15, bank=2)  # ['Unexpected CP Voltage']
+```
+
+`ALARMS` is the whole table, both banks. Passing any bank other than 1 or 2 raises `SpinEvProtocolError`.
+
+A charger whose firmware does not answer the bank 2 read is treated as reporting no bank 2 alarms, so bank 1 still reaches the caller.
+
+Bank 1 bits 10 and 11 are separate faults, the LCD board and the LED board. Bits 18 to 24 are unused, and bits 25 to 31 are configuration change flags rather than faults, so neither range is decoded.
 
 ## Things worth knowing
 

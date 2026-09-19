@@ -5,7 +5,7 @@ No credentials or device identifiers are stored in this package.
 
 from __future__ import annotations
 
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 SERVICE_UUID = "49535343-fe7d-4ae5-8fa9-9fafd205e455"
 """Vendor service. The Microchip/ISSC "Transparent UART" service, a generic
@@ -50,7 +50,9 @@ class Register(IntEnum):
     SESSION_ENERGY = 0x35
     """Energy delivered in the current session, in hundredths of a kWh."""
     ALARMS = 0x39
-    """Active alarm bit field, see :data:`spinev_ble.protocol.ALARM_BITS`."""
+    """Active alarm bit field, two words. See
+    :func:`spinev_ble.protocol.decode_alarms` and
+    :data:`spinev_ble.protocol.ALARMS`."""
     COMMIT = 0x3B
     """Applies a batch of configuration writes when written with 0x01000000."""
     CONTROL = 0x3C
@@ -121,6 +123,37 @@ class Register(IntEnum):
     """Ceiling on total grid power for the installation, as a float."""
     LOAD_BALANCING_PRIORITY = 0xD2
     """Priority mode used when several chargers share one supply."""
+
+
+ALARM_BANK2_FLAG = 0x10
+"""Flag byte that selects the second alarm bank when reading
+:attr:`Register.ALARMS`. Bank 1 is read with :attr:`Operation.READ`.
+
+This is the same byte value as :attr:`Operation.BULK`, which is unrelated:
+on :attr:`Register.ALARMS` the charger reads it as a bank selector, not as a
+bulk request. The two never collide, because bulk reads only ever go to the
+history registers."""
+
+ALARM_BANKS = (1, 2)
+"""The two alarm words the charger keeps on :attr:`Register.ALARMS`."""
+
+
+class AlarmSeverity(StrEnum):
+    """How serious the charger considers an alarm.
+
+    Members compare equal to their string value, so
+    ``alarm.severity == "Major"`` works as well as
+    ``alarm.severity is AlarmSeverity.MAJOR``.
+    """
+
+    CRITICAL = "Critical"
+    """charging is stopped and the condition is unsafe"""
+    MAJOR = "Major"
+    """charging is stopped or prevented"""
+    MINOR = "Minor"
+    """the charger keeps working with reduced function"""
+    WARNING = "Warning"
+    """a peripheral is degraded, charging is unaffected"""
 
 
 class ChargerState(IntEnum):

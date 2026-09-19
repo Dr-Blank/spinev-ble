@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from .const import ChargerState
+from .const import AlarmSeverity, ChargerState
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +21,34 @@ class Frame:
             f"Frame(register=0x{self.register:02X}, "
             f"flag=0x{self.flag:02X}, raw={self.raw.hex()})"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AlarmDef:
+    """One entry in the charger's alarm table.
+
+    An alarm is a single bit of a single alarm word. :attr:`bank` says which
+    word and :attr:`bit` which position in it; the remaining fields are how the
+    charger presents that condition. See
+    :func:`spinev_ble.protocol.decode_alarm_defs`.
+    """
+
+    #: Which alarm word the bit belongs to, 1 or 2.
+    bank: int
+    #: Bit position within the 32 bit alarm word, 0 is least significant.
+    bit: int
+    #: Human readable label for the condition.
+    name: str
+    #: Fault code shown for this alarm, e.g. ``"201"``. Several alarms can share
+    #: one code, and some carry none, in which case this is ``None``.
+    code: str | None = None
+    #: How serious the charger considers the alarm, ``None`` when it assigns no
+    #: severity.
+    severity: AlarmSeverity | None = None
+    #: Identifier the charger's own firmware uses for the bit, useful when
+    #: matching these alarms against the app or a service tool. ``None`` for
+    #: bits the firmware names nothing for.
+    constant: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
