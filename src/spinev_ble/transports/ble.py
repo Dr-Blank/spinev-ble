@@ -82,6 +82,12 @@ class BleTransport:
             ...
     """
 
+    timeout_hint = (
+        "Another Bluetooth client, such as the phone app, may be holding the "
+        "connection."
+    )
+    """Likely cause of a request getting no reply over Bluetooth."""
+
     def __init__(
         self,
         device: BLEDevice,

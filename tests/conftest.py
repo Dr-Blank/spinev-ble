@@ -11,6 +11,7 @@ sent the way a charger would, and sits behind two fakes:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -111,6 +112,13 @@ class ScriptedTransport(ScriptedCharger):
         """Raised by every send, when set."""
         self.drop_on_write = False
         """Set to drop the link instead of answering the next write."""
+        self.hold_writes = False
+        """Set to keep every send open until it is cancelled, the way a
+        transport that waits for the whole round trip does."""
+        self.send_cancelled = False
+        """True once a held send has been cancelled."""
+        self.timeout_hint: str | None = None
+        """Appended to timeout errors by the charger client, when set."""
 
     async def async_connect(
         self, on_frame: FrameCallback, on_disconnect: DisconnectCallback
@@ -132,6 +140,12 @@ class ScriptedTransport(ScriptedCharger):
         if self.send_error is not None:
             raise self.send_error
         self.writes.append(frame)
+        if self.hold_writes:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.send_cancelled = True
+                raise
         if self.drop_on_write:
             self.drop()
             return

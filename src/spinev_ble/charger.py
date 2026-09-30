@@ -116,6 +116,36 @@ def _value_bytes(payload: bytes, label: str) -> bytes:
     return value
 
 
+def _consume_result(task: asyncio.Future[Any]) -> None:
+    """Retrieve an abandoned send's outcome so asyncio does not warn about it."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _deliver(
+    transport: SpinEvTransport, frame: bytes, abort: asyncio.Future[Any]
+) -> None:
+    """Run ``transport.async_send(frame)``, giving up as soon as ``abort`` fails.
+
+    A transport may hold its send open for the whole round trip, as the OCPP
+    tunnel does. A disconnect fails ``abort``, which cuts such a send short
+    instead of leaving the caller to wait out the timeout.
+
+    :raises SpinEvConnectionError: whatever ``abort`` failed with, when it
+        fails before the send completes.
+    """
+    send = asyncio.ensure_future(transport.async_send(frame))
+    try:
+        await asyncio.wait((send, abort), return_when=asyncio.FIRST_COMPLETED)
+        if not send.done() and abort.done() and abort.exception() is not None:
+            abort.result()
+        await send
+    finally:
+        if not send.done():
+            send.cancel()
+            send.add_done_callback(_consume_result)
+
+
 class SpinEvCharger:
     """Talk to one charger, over the transport you choose.
 
@@ -172,6 +202,7 @@ class SpinEvCharger:
         self._timeout = timeout
         self._lock = asyncio.Lock()
         self._waiters: dict[int, tuple[asyncio.Future[bytes], int]] = {}
+        self._sends: set[asyncio.Future[None]] = set()
         self._bulk: list[bytes] = []
         self._bulk_event = asyncio.Event()
 
@@ -220,9 +251,12 @@ class SpinEvCharger:
 
     async def _send(self, transport: SpinEvTransport, frame: bytes) -> None:
         """Hand one frame to the transport, reporting failures as package errors."""
+        loop = asyncio.get_running_loop()
+        abort: asyncio.Future[None] = loop.create_future()
+        self._sends.add(abort)
         try:
             async with asyncio.timeout(self._timeout):
-                await transport.async_send(frame)
+                await _deliver(transport, frame, abort)
         except TimeoutError as err:
             raise SpinEvTimeoutError(
                 f"frame for register 0x{frame[2]:02X} was not delivered in time"
@@ -231,13 +265,24 @@ class SpinEvCharger:
             raise
         except Exception as err:
             raise SpinEvConnectionError(f"write failed: {err}") from err
+        finally:
+            self._sends.discard(abort)
+            if abort.done():
+                # A drop that lands just after the send finished is not an
+                # error for this write; mark the exception as seen.
+                abort.exception()
 
     def _on_disconnect(self) -> None:
         """Fail anything in flight instead of letting it wait for the timeout."""
+        error = SpinEvConnectionError("charger disconnected")
         for future, _flag in self._waiters.values():
             if not future.done():
-                future.set_exception(SpinEvConnectionError("charger disconnected"))
+                future.set_exception(error)
+        for abort in self._sends:
+            # Only this method completes an abort, and it empties the set.
+            abort.set_exception(error)
         self._waiters.clear()
+        self._sends.clear()
         self._bulk_event.set()
 
     def _on_notify(self, payload: bytes) -> None:
@@ -289,14 +334,14 @@ class SpinEvCharger:
                 # One deadline covers delivery and reply, because a transport
                 # such as the OCPP tunnel receives the reply while sending.
                 async with asyncio.timeout(self._timeout):
-                    await transport.async_send(frame)
+                    await _deliver(transport, frame, future)
                     payload = await future
             except TimeoutError as err:
-                raise SpinEvTimeoutError(
-                    f"no reply for register 0x{register:02X}. Over Bluetooth, "
-                    "another client such as the phone app may be holding the "
-                    "connection."
-                ) from err
+                message = f"no reply for register 0x{register:02X}"
+                hint = getattr(transport, "timeout_hint", None)
+                if hint:
+                    message = f"{message}. {hint}"
+                raise SpinEvTimeoutError(message) from err
             except SpinEvError:
                 raise
             except Exception as err:
@@ -449,8 +494,13 @@ class SpinEvCharger:
         The charger acknowledges immediately but takes about one second to
         report the new state and about two seconds before power actually flows.
 
+        No state check is made first: whether a start is allowed, for example
+        with no vehicle plugged in, is the charger's call, and a refusal comes
+        back as an error.
+
         :raises SpinEvCommandRejectedError: if the charger refuses the command,
-            which normally means the Bluetooth password is wrong.
+            which it does with no vehicle plugged in or a wrong Bluetooth
+            password.
         """
         await self._async_send_control(Command.START)
 
@@ -458,7 +508,8 @@ class SpinEvCharger:
         """Stop charging.
 
         :raises SpinEvCommandRejectedError: if the charger refuses the command,
-            which normally means the Bluetooth password is wrong.
+            which it does with no session to stop or a wrong Bluetooth
+            password.
         """
         await self._async_send_control(Command.STOP)
 

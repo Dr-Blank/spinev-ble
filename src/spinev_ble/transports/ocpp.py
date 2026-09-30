@@ -98,8 +98,9 @@ class OcppTunnelTransport:
       as an OCPP transaction instead.
     - A commit restarts the charger, which drops the OCPP connection. The
       reply to the commit may be lost with it, in which case the commit
-      raises whatever ``data_transfer`` raises for a lost connection,
-      although the charger acted on it.
+      raises :class:`SpinEvConnectionError` once :meth:`notify_disconnected`
+      is called, or :class:`SpinEvTimeoutError` if the drop is never
+      reported, although the charger acted on it.
 
     Call :meth:`notify_disconnected` when the charger's OCPP connection
     drops, so requests in flight fail at once instead of waiting out their
@@ -108,6 +109,12 @@ class OcppTunnelTransport:
     The transport keeps no deadline of its own: the charger client's
     ``timeout`` bounds each round trip.
     """
+
+    timeout_hint = (
+        "The charger's OCPP connection may be down, or its OCPP stack may have "
+        "stopped answering."
+    )
+    """Likely cause of a request getting no reply over the tunnel."""
 
     def __init__(self, data_transfer: DataTransferCall) -> None:
         """Create a transport around ``data_transfer``."""

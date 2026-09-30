@@ -7,6 +7,7 @@ plain :class:`~spinev_ble.transports.SpinEvTransport`, which is all it needs.
 from __future__ import annotations
 
 import asyncio
+import gc
 import subprocess
 import sys
 from datetime import datetime
@@ -31,6 +32,7 @@ from spinev_ble import (
     SpinEvTypeError,
     SpinEvValueError,
 )
+from spinev_ble.transports import BleTransport, OcppTunnelTransport
 
 from .conftest import (
     FAKE_DEVICE,
@@ -172,7 +174,20 @@ class TestConnection:
         with pytest.raises(SpinEvConnectionError, match="not connected"):
             await charger.async_get_power()
 
-    async def test_timeout_names_the_register_and_the_likely_cause(
+    async def test_timeout_names_the_register_and_the_transport_s_hint(
+        self, transport: ScriptedTransport
+    ) -> None:
+        transport.replies = {}
+        transport.timeout_hint = "The test link is down."
+        charger = make_charger(transport, timeout=0.05)
+        async with charger:
+            with pytest.raises(SpinEvTimeoutError) as excinfo:
+                await charger.async_get_power()
+        assert (
+            str(excinfo.value) == "no reply for register 0x84. The test link is down."
+        )
+
+    async def test_timeout_without_a_hint_names_only_the_register(
         self, transport: ScriptedTransport
     ) -> None:
         transport.replies = {}
@@ -180,8 +195,37 @@ class TestConnection:
         async with charger:
             with pytest.raises(SpinEvTimeoutError) as excinfo:
                 await charger.async_get_power()
-        assert "0x84" in str(excinfo.value)
-        assert "phone app" in str(excinfo.value)
+        assert str(excinfo.value) == "no reply for register 0x84"
+
+    def test_each_bundled_transport_names_its_own_likely_cause(self) -> None:
+        assert "phone app" in BleTransport.timeout_hint
+        assert "OCPP" in OcppTunnelTransport.timeout_hint
+        assert "phone app" not in OcppTunnelTransport.timeout_hint
+
+    async def test_cancelled_send_that_fails_while_stopping_is_not_reported(
+        self, transport: ScriptedTransport
+    ) -> None:
+        """A send that errors on its way out after a drop must not warn."""
+
+        async def fails_when_cancelled(frame: bytes) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise OSError("link torn down") from None
+
+        transport.async_send = fails_when_cancelled  # type: ignore[method-assign]
+        loop = asyncio.get_running_loop()
+        unhandled: list[dict[str, object]] = []
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+        charger = make_charger(transport, timeout=30.0)
+        async with charger:
+            loop.call_later(0.01, transport.drop)
+            with pytest.raises(SpinEvConnectionError, match="disconnected"):
+                await charger.async_get_power()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        gc.collect()
+        assert unhandled == []
 
     async def test_dropped_link_fails_fast_instead_of_waiting(
         self, transport: ScriptedTransport
@@ -192,6 +236,34 @@ class TestConnection:
             transport.drop_on_write = True
             with pytest.raises(SpinEvConnectionError, match="disconnected"):
                 await charger.async_get_power()
+
+    async def test_drop_during_a_held_send_fails_the_request_fast(
+        self, transport: ScriptedTransport
+    ) -> None:
+        """A transport that holds its send for the round trip is cut short."""
+        charger = make_charger(transport, timeout=30.0)
+        async with charger:
+            transport.hold_writes = True
+            asyncio.get_running_loop().call_later(0.01, transport.drop)
+            async with asyncio.timeout(1):
+                with pytest.raises(SpinEvConnectionError, match="disconnected"):
+                    await charger.async_get_power()
+        await asyncio.sleep(0)
+        assert transport.send_cancelled
+
+    async def test_drop_during_a_held_send_fails_a_write_fast(
+        self, transport: ScriptedTransport
+    ) -> None:
+        """Writes that wait for no reply, such as a commit, are cut short too."""
+        charger = make_charger(transport, timeout=30.0)
+        async with charger:
+            transport.hold_writes = True
+            asyncio.get_running_loop().call_later(0.01, transport.drop)
+            async with asyncio.timeout(1):
+                with pytest.raises(SpinEvConnectionError, match="disconnected"):
+                    await charger.async_commit()
+        await asyncio.sleep(0)
+        assert transport.send_cancelled
 
     async def test_short_reply_is_reported_as_a_protocol_error(
         self, transport: ScriptedTransport

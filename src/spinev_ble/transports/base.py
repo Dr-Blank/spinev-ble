@@ -24,6 +24,11 @@ class SpinEvTransport(Protocol):
     requests, matches replies and decodes values, so the same client works
     over any transport. The client serialises its requests, so a transport
     never has two :meth:`async_send` calls in flight at once.
+
+    A transport may also define a ``timeout_hint`` string: the likely cause
+    of a request getting no reply over that link. The client appends it to
+    :class:`~spinev_ble.exceptions.SpinEvTimeoutError`. It is optional and
+    not part of the checked protocol.
     """
 
     @property
