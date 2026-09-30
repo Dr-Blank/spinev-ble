@@ -1,20 +1,25 @@
-"""Local Bluetooth LE control for Exicom Spin EV chargers.
+"""Local control for Exicom Spin EV chargers.
 
-The core of this package is a dependency free codec. It turns charger commands
-into bytes and bytes back into values, and never touches a radio. How those
-bytes reach the charger is up to you: bleak, an ESPHome proxy, a serial bridge,
-or nothing at all if you only want to inspect frames.
+The package has three layers, and only the transports have dependencies:
 
-Pure codec, no dependencies::
+- **Codec** (:mod:`spinev_ble.protocol`): turns charger commands into frames
+  and frames back into values. Pure, no dependencies::
 
-    from spinev_ble import Command, build_control
+      from spinev_ble import Command, build_control
 
-    frame = build_control(Command.START, password=0xABCDEF)
-    # send `frame` however you like
+      frame = build_control(Command.START, password=0xABCDEF)
+      # send `frame` however you like
 
-Optional convenience client, needs ``pip install spinev-ble[bleak]``::
+- **Charger client** (:class:`SpinEvCharger`): the high level API, one method
+  per charger feature. Pure, no dependencies. It talks through a transport.
 
-    from spinev_ble import SpinEvCharger
+- **Transports** (:mod:`spinev_ble.transports`): what carries the frames.
+  :class:`BleTransport` uses the Bluetooth link and needs
+  ``pip install spinev-ble[bleak]``. :class:`OcppTunnelTransport` uses the
+  charger's OCPP connection and needs nothing extra::
+
+      async with SpinEvCharger(BleTransport(device)) as charger:
+          ...
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 
+from .charger import SpinEvCharger
 from .const import (
     ADVERTISED_NAME_PATTERN,
     ALARM_BANK2_FLAG,
@@ -53,6 +59,8 @@ from .exceptions import (
     SpinEvPasswordError,
     SpinEvProtocolError,
     SpinEvTimeoutError,
+    SpinEvTypeError,
+    SpinEvUnsupportedError,
     SpinEvValueError,
 )
 from .models import (
@@ -88,9 +96,16 @@ from .protocol import (
     is_reply,
     parse_frame,
 )
+from .transports import (
+    DataTransferCall,
+    DisconnectCallback,
+    FrameCallback,
+    OcppTunnelTransport,
+    SpinEvTransport,
+)
 
 if TYPE_CHECKING:
-    from .client import BleakClientLike, SpinEvCharger
+    from .transports.ble import BleakClientLike, BleTransport
 
 try:
     __version__ = version("spinev-ble")
@@ -117,14 +132,19 @@ __all__ = [
     "WIFI_FIELD_BYTES",
     "AlarmDef",
     "AlarmSeverity",
+    "BleTransport",
     "BleakClientLike",
     "ChargerState",
     "ChargerStatus",
     "ChargingSession",
     "Command",
+    "DataTransferCall",
+    "DisconnectCallback",
     "Frame",
+    "FrameCallback",
     "LoadBalancingConfig",
     "OcppConfig",
+    "OcppTunnelTransport",
     "Operation",
     "Register",
     "SpinEvBusyError",
@@ -135,6 +155,9 @@ __all__ = [
     "SpinEvPasswordError",
     "SpinEvProtocolError",
     "SpinEvTimeoutError",
+    "SpinEvTransport",
+    "SpinEvTypeError",
+    "SpinEvUnsupportedError",
     "SpinEvValueError",
     "__version__",
     "build_alarm_read",
@@ -161,21 +184,15 @@ __all__ = [
     "parse_frame",
 ]
 
-_LAZY = frozenset({"BleakClientLike", "SpinEvCharger"})
-"""Names that live in the optional bleak backed client module."""
+_BLE = frozenset({"BleTransport", "BleakClientLike"})
+"""Names that live in the optional bleak backed transport."""
 
 
 def __getattr__(name: str) -> Any:
-    """Import the optional bleak client only when it is actually asked for."""
-    if name in _LAZY:
-        try:
-            # Deliberate lazy import so the core codec needs no bleak.
-            from . import client  # pylint: disable=import-outside-toplevel
-        except ImportError as err:  # pragma: no cover
-            raise ImportError(
-                f"{name} needs bleak. Install it with "
-                "'pip install spinev-ble[bleak]', or use the dependency free "
-                "codec in spinev_ble.protocol instead."
-            ) from err
-        return getattr(client, name)
+    """Import the Bluetooth transport only when it is actually asked for."""
+    if name in _BLE:
+        # Deliberate lazy import so the rest of the package needs no bleak.
+        from . import transports  # pylint: disable=import-outside-toplevel
+
+        return getattr(transports, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

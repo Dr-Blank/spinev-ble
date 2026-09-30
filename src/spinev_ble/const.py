@@ -299,3 +299,6 @@ BULK_IDLE_TIMEOUT = 0.4
 
 DEFAULT_HISTORY_COUNT = 40
 """How many records :meth:`SpinEvCharger.async_get_history` asks for."""
+
+BULK_REGISTERS = frozenset({Register.HISTORY_SESSIONS, Register.HISTORY_EVENTS})
+"""Registers whose reads stream records instead of answering with one frame."""

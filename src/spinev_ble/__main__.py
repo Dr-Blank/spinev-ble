@@ -14,9 +14,10 @@ import sys
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 
-from .client import SpinEvCharger
+from .charger import SpinEvCharger
 from .const import ADVERTISED_NAME_PATTERN, DEFAULT_HISTORY_COUNT
 from .exceptions import SpinEvError
+from .transports.ble import BleTransport
 
 _NAME_RE = re.compile(ADVERTISED_NAME_PATTERN)
 
@@ -60,6 +61,16 @@ async def _resolve(address: str | None, timeout: float) -> BLEDevice:  # noqa: A
     return device
 
 
+async def _open(args: argparse.Namespace) -> SpinEvCharger:
+    """Find the charger and build a Bluetooth client for it."""
+    device = await _resolve(args.address, args.timeout)
+    return SpinEvCharger(
+        BleTransport(device, timeout=args.timeout),
+        password=args.password,
+        timeout=args.timeout,
+    )
+
+
 def _format(value: float | int | str | None, spec: str = "") -> str:
     """Format a reading, or say so when the charger did not supply one."""
     if value is None:
@@ -78,8 +89,7 @@ async def _cmd_scan(args: argparse.Namespace) -> None:
 
 
 async def _cmd_password(args: argparse.Namespace) -> None:
-    device = await _resolve(args.address, args.timeout)
-    async with SpinEvCharger(device, timeout=args.timeout) as charger:
+    async with await _open(args) as charger:
         password = await charger.async_get_password()
     print(f"password 0x{password:06X} ({password})")
     print(
@@ -90,8 +100,7 @@ async def _cmd_password(args: argparse.Namespace) -> None:
 
 
 async def _cmd_status(args: argparse.Namespace) -> None:
-    device = await _resolve(args.address, args.timeout)
-    async with SpinEvCharger(device, args.password, timeout=args.timeout) as charger:
+    async with await _open(args) as charger:
         status = await charger.async_get_status()
     state = status.state.name if status.state else f"unknown ({status.state_value})"
     print(f"state            {state}")
@@ -108,8 +117,7 @@ async def _cmd_status(args: argparse.Namespace) -> None:
 
 
 async def _cmd_history(args: argparse.Namespace) -> None:
-    device = await _resolve(args.address, args.timeout)
-    async with SpinEvCharger(device, args.password, timeout=args.timeout) as charger:
+    async with await _open(args) as charger:
         sessions = await charger.async_get_history(args.count)
     if not sessions:
         print("no history returned")
@@ -125,9 +133,8 @@ async def _cmd_history(args: argparse.Namespace) -> None:
 
 
 async def _run_control(args: argparse.Namespace, start: bool) -> None:
-    device = await _resolve(args.address, args.timeout)
     action = "start" if start else "stop"
-    async with SpinEvCharger(device, args.password, timeout=args.timeout) as charger:
+    async with await _open(args) as charger:
         if start:
             await charger.async_start_charging()
         else:

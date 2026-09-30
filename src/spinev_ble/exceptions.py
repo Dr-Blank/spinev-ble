@@ -49,5 +49,18 @@ class SpinEvBusyError(SpinEvError):
     """
 
 
+class SpinEvUnsupportedError(SpinEvError):
+    """The transport in use cannot carry this operation.
+
+    For example, the OCPP tunnel carries one reply per request, so the
+    streamed history reads are not available over it.
+    """
+
+
+class SpinEvTypeError(SpinEvError, TypeError):
+    """An argument is the wrong kind of object, such as a Bluetooth device
+    passed where a transport is expected."""
+
+
 class SpinEvValueError(SpinEvError, ValueError):
     """A value passed to a setter is outside the range the charger accepts."""

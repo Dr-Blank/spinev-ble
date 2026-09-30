@@ -1,6 +1,6 @@
 ## What this project is
 
-Published PyPI lib: local Bluetooth LE control, Exicom Spin EV chargers. Core (`const`, `protocol`, `models`, `exceptions`) pure codec, **zero runtime deps**. `client` and `__main__` optional, behind `bleak` extra. People install this, build on it — public API contract, not draft.
+Published PyPI lib: local control, Exicom Spin EV chargers, over Bluetooth or the charger's OCPP connection. Three layers. Codec (`const`, `protocol`, `models`, `exceptions`) and charger client (`charger`) pure, **zero runtime deps**. Transports (`transports/`) carry frames: `base` (the `SpinEvTransport` protocol) and `ocpp` pure, `ble` and `__main__` behind `bleak` extra. People install this, build on it — public API contract, not draft.
 
 ## Never leak secrets
 
@@ -46,12 +46,19 @@ re-provisioned"), never as statements about provenance.
   Raise instead.
 - Validate inputs reaching charger. Guard preventing bricked device worth more
   than convenience of skipping it.
-- Keep codec pure. `protocol.py` does no I/O, imports nothing optional.
-- `bleak` import stays confined to `client.py` and `__main__.py`, reached
-  lazily from `__init__.py`. Importing `spinev_ble` must work without bleak
-  installed.
-- New behaviour comes with tests. Client tested through fake transport in
-  `tests/conftest.py`, never against real hardware.
+- Keep codec and charger client pure. `protocol.py` and `charger.py` do no
+  I/O of their own and import nothing optional. Moving bytes is a
+  transport's job; transport specific formats (e.g. OCPP tunnel hex) live in
+  that transport, not in the codec.
+- `bleak` import stays confined to `transports/ble.py` and `__main__.py`,
+  reached lazily from `__init__.py` and `transports/__init__.py`. Importing
+  `spinev_ble` must work without bleak installed (a test guards this).
+- No OCPP library dependency. The OCPP transport takes a caller supplied
+  `DataTransfer` function.
+- New behaviour comes with tests, never against real hardware. Charger client
+  tested through `ScriptedTransport`, BLE transport through `FakeBleakClient`,
+  OCPP transport through a fake central system; all share the scripted
+  charger in `tests/conftest.py`.
 
 ## Gates
 
