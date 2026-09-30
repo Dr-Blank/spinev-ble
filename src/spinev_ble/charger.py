@@ -1,4 +1,8 @@
-"""Bluetooth LE client for Exicom Spin EV chargers."""
+"""Charger client: the high level API for one Exicom Spin EV charger.
+
+This module is pure. It builds requests, matches replies and decodes values,
+and leaves moving the bytes to a transport from :mod:`spinev_ble.transports`.
+"""
 
 from __future__ import annotations
 
@@ -7,16 +11,11 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 from types import TracebackType
-from typing import Any, Protocol, cast, runtime_checkable
-
-from bleak import BleakClient
-from bleak.backends.device import BLEDevice
-from bleak_retry_connector import MAX_CONNECT_ATTEMPTS, establish_connection
+from typing import Any
 
 from .const import (
     ALARM_BANKS,
     BULK_IDLE_TIMEOUT,
-    CHARACTERISTIC_UUID,
     DEFAULT_HISTORY_COUNT,
     DEFAULT_MAX_CURRENT_A,
     DEFAULT_TIMEOUT,
@@ -37,6 +36,7 @@ from .exceptions import (
     SpinEvError,
     SpinEvProtocolError,
     SpinEvTimeoutError,
+    SpinEvTypeError,
     SpinEvValueError,
 )
 from .models import (
@@ -70,45 +70,9 @@ from .protocol import (
     is_history_record,
     is_reply,
 )
+from .transports.base import SpinEvTransport
 
 _LOGGER = logging.getLogger(__name__)
-
-
-@runtime_checkable
-class BleakClientLike(Protocol):
-    """The part of :class:`bleak.BleakClient` this library uses.
-
-    Any object with these members works as a transport, which is what lets the
-    charger be reached through something other than the local adapter. The
-    characteristic and payload arguments are positional only, so an
-    implementation is free to name them whatever suits it.
-    """
-
-    @property
-    def is_connected(self) -> bool:
-        """True while the link is up."""
-
-    async def connect(self, **kwargs: Any) -> Any:
-        """Open the link."""
-
-    async def disconnect(self) -> Any:
-        """Close the link."""
-
-    async def start_notify(self, char_specifier: Any, callback: Any, /) -> Any:
-        """Subscribe to notifications on a characteristic."""
-
-    async def write_gatt_char(
-        self, char_specifier: Any, data: Any, /, *, response: bool | None = None
-    ) -> Any:
-        """Write bytes to a characteristic."""
-
-
-ClientFactory = Callable[..., BleakClientLike]
-"""Builds the transport. Connections go through
-:func:`bleak_retry_connector.establish_connection`, which calls this with the
-device positionally and passes ``disconnected_callback``, ``timeout``, ``pair``
-and its own markers as keywords, so any replacement must accept ``**kwargs``.
-:class:`bleak.BleakClient` and ``habluetooth.HaBleakClientWrapper`` both do."""
 
 # States in which a charging session is open, whether or not power is
 # flowing right now. A suspended session is still a session.
@@ -136,14 +100,6 @@ _STATUS_READS: tuple[tuple[str, Register, Callable[[bytes], Any]], ...] = (
 )
 
 
-async def _async_close(client: BleakClientLike) -> None:
-    """Drop a link, ignoring a failure to close one that is already gone."""
-    try:
-        await client.disconnect()
-    except Exception as err:  # pylint: disable=broad-exception-caught
-        _LOGGER.debug("error while disconnecting: %s", err)
-
-
 def _value_bytes(payload: bytes, label: str) -> bytes:
     """Take the four value bytes out of a reply.
 
@@ -160,95 +116,120 @@ def _value_bytes(payload: bytes, label: str) -> bytes:
     return value
 
 
+def _consume_result(task: asyncio.Future[Any]) -> None:
+    """Retrieve an abandoned send's outcome so asyncio does not warn about it."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _deliver(
+    transport: SpinEvTransport, frame: bytes, abort: asyncio.Future[Any]
+) -> None:
+    """Run ``transport.async_send(frame)``, giving up as soon as ``abort`` fails.
+
+    A transport may hold its send open for the whole round trip, as the OCPP
+    tunnel does. A disconnect fails ``abort``, which cuts such a send short
+    instead of leaving the caller to wait out the timeout.
+
+    :raises SpinEvConnectionError: whatever ``abort`` failed with, when it
+        fails before the send completes.
+    """
+    send = asyncio.ensure_future(transport.async_send(frame))
+    try:
+        await asyncio.wait((send, abort), return_when=asyncio.FIRST_COMPLETED)
+        if not send.done() and abort.done() and abort.exception() is not None:
+            abort.result()
+        await send
+    finally:
+        if not send.done():
+            send.cancel()
+            send.add_done_callback(_consume_result)
+
+
 class SpinEvCharger:
-    """Talk to one charger.
+    """Talk to one charger, over the transport you choose.
 
-    The charger accepts a single Bluetooth client at a time. If the official
-    phone app is connected, this will not be able to connect, and the reverse
-    is also true.
+    The client builds requests, matches replies and decodes values. Moving the
+    bytes is the transport's job, so pick one from :mod:`spinev_ble.transports`:
 
-    Usage::
+    - :class:`~spinev_ble.transports.BleTransport` for the Bluetooth link
+      (needs the ``bleak`` extra)::
 
-        async with SpinEvCharger(device, password=my_password) as charger:
+          transport = BleTransport(device)
+
+    - :class:`~spinev_ble.transports.OcppTunnelTransport` for the charger's
+      OCPP connection::
+
+          transport = OcppTunnelTransport(data_transfer)
+
+    Then::
+
+        async with SpinEvCharger(transport, password=0xABCDEF) as charger:
             status = await charger.async_get_status()
             print(status.power_w)
 
-    ``device`` should be a :class:`bleak.backends.device.BLEDevice`.
+    Every method works the same over any transport, except where the
+    transport documents a limit.
     """
 
     def __init__(
         self,
-        device: BLEDevice,
-        password: int | None = None,
+        transport: SpinEvTransport,
         *,
+        password: int | None = None,
         timeout: float = DEFAULT_TIMEOUT,
-        client_class: ClientFactory | None = None,
-        max_attempts: int = MAX_CONNECT_ATTEMPTS,
     ) -> None:
-        """Create a client.
+        """Create a client that talks through ``transport``.
 
-        ``password`` may be omitted, in which case it is read from the charger
-        on first use via :meth:`async_get_password`.
+        ``password`` is the charger's Bluetooth password, which start and stop
+        commands carry. It may be omitted, in which case it is read from the
+        charger on first use via :meth:`async_get_password`.
 
-        ``client_class`` builds the transport. It defaults to
-        :class:`bleak.BleakClient`, which uses the local adapter. Pass a
-        different one to route elsewhere, for example
-        ``habluetooth.HaBleakClientWrapper`` to reach the charger through an
-        ESPHome Bluetooth proxy. Anything matching :class:`BleakClientLike`
-        works.
+        ``timeout`` bounds each request, in seconds: delivering the frame and
+        receiving the reply, over whatever transport. It is the only request
+        deadline; transports keep none of their own.
 
-        ``max_attempts`` caps the connection attempts made per
-        :meth:`async_connect`. The charger takes one client at a time, so a
-        caller that would rather hear straight away that the slot is taken,
-        such as a setup form, can pass 1.
+        :raises SpinEvTypeError: if ``transport`` is not a
+            :class:`~spinev_ble.transports.SpinEvTransport`.
         """
-        self._device = device
+        if not isinstance(transport, SpinEvTransport):
+            raise SpinEvTypeError(
+                f"{type(transport).__name__} is not a transport. Wrap it in one "
+                "from spinev_ble.transports, such as BleTransport(device)."
+            )
+        self._transport = transport
         self._password = password
         self._timeout = timeout
-        self._max_attempts = max_attempts
-        self._client_class: ClientFactory = client_class or BleakClient
-        self._client: BleakClientLike | None = None
         self._lock = asyncio.Lock()
         self._waiters: dict[int, tuple[asyncio.Future[bytes], int]] = {}
+        self._sends: set[asyncio.Future[None]] = set()
         self._bulk: list[bytes] = []
         self._bulk_event = asyncio.Event()
 
     @property
+    def transport(self) -> SpinEvTransport:
+        """The transport carrying this client's frames."""
+        return self._transport
+
+    @property
     def is_connected(self) -> bool:
-        """True while the BLE link is up."""
-        return self._client is not None and self._client.is_connected
+        """True while the link to the charger is up."""
+        return self._transport.is_connected
 
     async def async_connect(self) -> None:
-        """Connect and subscribe to notifications."""
+        """Connect and start listening for replies."""
         if self.is_connected:
             return
         try:
-            # The factory is typed by what this library calls on it, which is
-            # looser than the class establish_connection asks for.
-            client = await establish_connection(
-                cast(type[BleakClient], self._client_class),
-                self._device,
-                self._device.name or self._device.address,
-                disconnected_callback=self._on_disconnect,
-                max_attempts=self._max_attempts,
-                timeout=self._timeout,
-            )
+            await self._transport.async_connect(self._on_notify, self._on_disconnect)
+        except SpinEvError:
+            raise
         except Exception as err:
             raise SpinEvConnectionError(f"could not connect: {err}") from err
-        try:
-            await client.start_notify(CHARACTERISTIC_UUID, self._on_notify)
-        except Exception as err:
-            # The link is up but unusable, and the charger has only the one
-            # slot, so it goes back before the failure is reported.
-            await _async_close(client)
-            raise SpinEvConnectionError(f"could not connect: {err}") from err
-        self._client = client
 
     async def async_disconnect(self) -> None:
         """Drop the link. Safe to call when already disconnected."""
-        client, self._client = self._client, None
-        if client is not None:
-            await _async_close(client)
+        await self._transport.async_disconnect()
 
     async def __aenter__(self) -> SpinEvCharger:
         await self.async_connect()
@@ -262,25 +243,51 @@ class SpinEvCharger:
     ) -> None:
         await self.async_disconnect()
 
-    def _require_client(self) -> BleakClientLike:
-        """Return the live transport, or raise if there is not one."""
-        client = self._client
-        if client is None or not client.is_connected:
+    def _require_transport(self) -> SpinEvTransport:
+        """Return the transport if it is connected, or raise."""
+        if not self._transport.is_connected:
             raise SpinEvConnectionError("not connected")
-        return client
+        return self._transport
 
-    def _on_disconnect(self, _client: object) -> None:
+    async def _send(self, transport: SpinEvTransport, frame: bytes) -> None:
+        """Hand one frame to the transport, reporting failures as package errors."""
+        loop = asyncio.get_running_loop()
+        abort: asyncio.Future[None] = loop.create_future()
+        self._sends.add(abort)
+        try:
+            async with asyncio.timeout(self._timeout):
+                await _deliver(transport, frame, abort)
+        except TimeoutError as err:
+            raise SpinEvTimeoutError(
+                f"frame for register 0x{frame[2]:02X} was not delivered in time"
+            ) from err
+        except SpinEvError:
+            raise
+        except Exception as err:
+            raise SpinEvConnectionError(f"write failed: {err}") from err
+        finally:
+            self._sends.discard(abort)
+            if abort.done():
+                # A drop that lands just after the send finished is not an
+                # error for this write; mark the exception as seen.
+                abort.exception()
+
+    def _on_disconnect(self) -> None:
         """Fail anything in flight instead of letting it wait for the timeout."""
+        error = SpinEvConnectionError("charger disconnected")
         for future, _flag in self._waiters.values():
             if not future.done():
-                future.set_exception(SpinEvConnectionError("charger disconnected"))
+                future.set_exception(error)
+        for abort in self._sends:
+            # Only this method completes an abort, and it empties the set.
+            abort.set_exception(error)
         self._waiters.clear()
+        self._sends.clear()
         self._bulk_event.set()
 
-    def _on_notify(self, _sender: object, data: bytearray) -> None:
+    def _on_notify(self, payload: bytes) -> None:
         # Payloads are never logged. Several registers carry credentials, and a
         # debug log is not the place for them.
-        payload = bytes(data)
         if is_history_record(payload):
             self._bulk.append(payload)
             self._bulk_event.set()
@@ -318,19 +325,23 @@ class SpinEvCharger:
         charger echoes back, because the charger does not guarantee ordering
         when several requests are in flight. Requests are serialised anyway.
         """
-        client = self._require_client()
+        transport = self._require_transport()
         async with self._lock:
             loop = asyncio.get_running_loop()
             future: asyncio.Future[bytes] = loop.create_future()
             self._waiters[register] = (future, frame[3])
             try:
-                await client.write_gatt_char(CHARACTERISTIC_UUID, frame, response=True)
-                payload = await asyncio.wait_for(future, timeout=self._timeout)
+                # One deadline covers delivery and reply, because a transport
+                # such as the OCPP tunnel receives the reply while sending.
+                async with asyncio.timeout(self._timeout):
+                    await _deliver(transport, frame, future)
+                    payload = await future
             except TimeoutError as err:
-                raise SpinEvTimeoutError(
-                    f"no reply for register 0x{register:02X}. Another client, such as "
-                    "the phone app, may be holding the connection."
-                ) from err
+                message = f"no reply for register 0x{register:02X}"
+                hint = getattr(transport, "timeout_hint", None)
+                if hint:
+                    message = f"{message}. {hint}"
+                raise SpinEvTimeoutError(message) from err
             except SpinEvError:
                 raise
             except Exception as err:
@@ -347,15 +358,10 @@ class SpinEvCharger:
         write already succeeded once the acknowledgement above returns, and
         any echo that shows up afterwards is dropped as an unmatched reply.
         """
-        client = self._require_client()
+        transport = self._require_transport()
         async with self._lock:
-            try:
-                for frame in frames:
-                    await client.write_gatt_char(
-                        CHARACTERISTIC_UUID, frame, response=True
-                    )
-            except Exception as err:
-                raise SpinEvConnectionError(f"write failed: {err}") from err
+            for frame in frames:
+                await self._send(transport, frame)
 
     async def async_read_raw(self, register: int, parameter: int = 0) -> bytes:
         """Read a register and return its four raw value bytes."""
@@ -488,8 +494,13 @@ class SpinEvCharger:
         The charger acknowledges immediately but takes about one second to
         report the new state and about two seconds before power actually flows.
 
+        No state check is made first: whether a start is allowed, for example
+        with no vehicle plugged in, is the charger's call, and a refusal comes
+        back as an error.
+
         :raises SpinEvCommandRejectedError: if the charger refuses the command,
-            which normally means the Bluetooth password is wrong.
+            which it does with no vehicle plugged in or a wrong Bluetooth
+            password.
         """
         await self._async_send_control(Command.START)
 
@@ -497,7 +508,8 @@ class SpinEvCharger:
         """Stop charging.
 
         :raises SpinEvCommandRejectedError: if the charger refuses the command,
-            which normally means the Bluetooth password is wrong.
+            which it does with no session to stop or a wrong Bluetooth
+            password.
         """
         await self._async_send_control(Command.STOP)
 
@@ -842,16 +854,17 @@ class SpinEvCharger:
 
         The charger streams records with no end marker, so collection stops on
         an idle gap. Duplicate records are removed while preserving order.
+
+        :raises SpinEvUnsupportedError: over a transport that cannot carry a
+            streamed read, such as
+            :class:`~spinev_ble.transports.OcppTunnelTransport`.
         """
-        client = self._require_client()
+        transport = self._require_transport()
         async with self._lock:
             self._bulk.clear()
             self._bulk_event.clear()
             frame = build_read(Register.HISTORY_SESSIONS, count)
-            try:
-                await client.write_gatt_char(CHARACTERISTIC_UUID, frame, response=True)
-            except Exception as err:
-                raise SpinEvConnectionError(f"write failed: {err}") from err
+            await self._send(transport, frame)
             await self._collect_bulk()
             records = list(self._bulk)
             self._bulk.clear()

@@ -266,7 +266,8 @@ def check_control_reply(sent: bytes, reply: bytes) -> None:
         raise SpinEvProtocolError("reply is not a control reply")
     if frame.raw == struct.pack(">I", CONTROL_REJECTED):
         raise SpinEvCommandRejectedError(
-            "the charger refused the command. The Bluetooth password is probably wrong."
+            "the charger refused the command. Check that a vehicle is plugged "
+            "in and the Bluetooth password is right."
         )
     if frame.raw != sent[VALUE_OFFSET:]:
         raise SpinEvProtocolError(

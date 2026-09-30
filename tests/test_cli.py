@@ -1,7 +1,7 @@
 """Tests for the argument handling in the command line tool.
 
 Nothing here touches Bluetooth. The commands themselves are covered by the
-client tests.
+charger client and transport tests.
 """
 
 from __future__ import annotations

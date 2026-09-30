@@ -36,9 +36,9 @@ class SpinEvCommandRejectedError(SpinEvError):
     """The charger received a start or stop command and refused it.
 
     The command did not take effect: the charger is still in whatever state it
-    was in before. The usual cause is a wrong Bluetooth password, since the
-    charger reports a bad password by refusing the command rather than by
-    reporting a distinct error.
+    was in before. The charger gives the same refusal for every cause, so the
+    reason cannot be told from the reply. Known causes are a wrong Bluetooth
+    password, and a start with no vehicle plugged in.
     """
 
 
@@ -47,6 +47,19 @@ class SpinEvBusyError(SpinEvError):
 
     Stop charging first, or wait for the session to end.
     """
+
+
+class SpinEvUnsupportedError(SpinEvError):
+    """The transport in use cannot carry this operation.
+
+    For example, the OCPP tunnel carries one reply per request, so the
+    streamed history reads are not available over it.
+    """
+
+
+class SpinEvTypeError(SpinEvError, TypeError):
+    """An argument is the wrong kind of object, such as a Bluetooth device
+    passed where a transport is expected."""
 
 
 class SpinEvValueError(SpinEvError, ValueError):

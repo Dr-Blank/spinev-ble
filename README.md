@@ -1,16 +1,30 @@
 # spinev-ble
 
-Local Bluetooth LE control for Exicom Spin EV chargers.
-
-The core is a **dependency free codec**. It turns commands into bytes and bytes back into values, and never touches a radio. How those bytes reach the charger is your choice: bleak, an ESPHome Bluetooth proxy, a serial bridge, or nothing at all if you only want to inspect frames.
+Local control for Exicom Spin EV chargers, over Bluetooth or over the charger's own OCPP connection.
 
 No cloud, no vendor app, no account, no internet. Not affiliated with Exicom.
+
+## How it fits together
+
+| Layer | What it does | Dependencies |
+|---|---|---|
+| Codec (`spinev_ble.protocol`) | Turns commands into frames and frames back into values | none |
+| Charger client (`SpinEvCharger`) | One method per charger feature: status, start, stop, limits, settings | none |
+| Transports (`spinev_ble.transports`) | Carry the frames to the charger | per transport |
+
+The charger speaks one register protocol whatever carries it, so the client is the same everywhere and you pick the transport:
+
+| Transport | Reaches the charger through | Needs |
+|---|---|---|
+| `BleTransport` | Bluetooth LE, locally or through an ESPHome Bluetooth proxy | `spinev-ble[bleak]` |
+| `OcppTunnelTransport` | The charger's OCPP 1.6 connection to your central system | nothing, you supply the `DataTransfer` call |
+| your own | Anything that implements `SpinEvTransport` | whatever it needs |
 
 ## Install
 
 ```bash
-pip install spinev-ble            # codec only, zero dependencies
-pip install spinev-ble[bleak]     # adds the optional BLE client and CLI
+pip install spinev-ble            # codec, charger client, OCPP transport; zero dependencies
+pip install spinev-ble[bleak]     # adds the Bluetooth transport and the CLI
 ```
 
 Python 3.11 or newer.
@@ -34,17 +48,35 @@ state = decode_uint(bytes.fromhex("00000004"))
 ChargerState(state)  # ChargerState.CHARGING
 ```
 
-Write the bytes to characteristic `49535343-1e4d-4bd9-ba61-23c647249616` with response, and read replies as notifications on that same characteristic. That is the whole transport contract.
+To carry frames yourself instead of using a transport: over Bluetooth, write them to characteristic `49535343-1e4d-4bd9-ba61-23c647249616` with response and read replies as notifications on the same characteristic.
 
-## Optional BLE client
+## Charger client
 
-Needs the `bleak` extra. Convenience only, the codec above is the real library.
+`SpinEvCharger` takes the transport to talk through, and optionally the charger's Bluetooth password, which start and stop commands carry:
+
+```python
+async with SpinEvCharger(transport, password=0xABCDEF) as charger:
+    status = await charger.async_get_status()
+    print(status.state.name, status.power_w, "W")
+
+    await charger.async_start_charging()
+```
+
+`ChargerStatus` is an immutable snapshot. Every reading is `None` if the charger did not supply it, so check before formatting. When the charger reports a state this library does not name, `status.state` is `None` and `status.state_value` holds the raw number, rather than the whole read failing.
+
+Register reads are logged as an id and length, never the decoded value, since some registers hold credentials.
+
+## Transports
+
+### Bluetooth
+
+Needs the `bleak` extra.
 
 ```python
 import asyncio
 
 from bleak import BleakScanner
-from spinev_ble import SpinEvCharger
+from spinev_ble import BleTransport, SpinEvCharger
 
 
 async def main() -> None:
@@ -52,33 +84,46 @@ async def main() -> None:
     if device is None:
         raise SystemExit("charger not found, is the phone app connected to it?")
 
-    async with SpinEvCharger(device, password=0xABCDEF) as charger:
-        status = await charger.async_get_status()
-        print(status.state.name, status.power_w, "W")
-
-        await charger.async_start_charging()
-        await asyncio.sleep(3)
-        await charger.async_stop_charging()
+    async with SpinEvCharger(BleTransport(device), password=0xABCDEF) as charger:
+        print(await charger.async_get_power(), "W")
 
 
 asyncio.run(main())
 ```
 
-`ChargerStatus` is an immutable snapshot. Every reading is `None` if the charger did not supply it, so check before formatting. When the charger reports a state this library does not name, `status.state` is `None` and `status.state_value` holds the raw number, rather than the whole read failing.
+`BleTransport` takes `client_class` to swap the Bluetooth client for anything matching `BleakClientLike`. For example `habluetooth.HaBleakClientWrapper` reaches the charger through an ESPHome Bluetooth proxy. It is called as `client_class(device, timeout=..., disconnected_callback=...)`. `max_attempts=1` gives a fast answer when the charger's single Bluetooth slot is taken.
 
-Register reads are logged as an id and length, never the decoded value, since some registers hold credentials.
+### OCPP
 
-### Custom transports
+A charger connected to an OCPP 1.6 central system takes the same register frames over that connection, as a `DataTransfer` with vendor id `CPV07` and message id `CC_CONFIG`. `OcppTunnelTransport` wraps that, so every `SpinEvCharger` method works through your central system with no Bluetooth at all.
 
-`SpinEvCharger` does not care what carries the bytes. Pass `client_class` to swap the transport for anything matching `BleakClientLike`, which is the handful of members the client actually uses:
+The transport depends on no OCPP library. Give it a function that sends one `DataTransfer` to the charger and returns the reply's status and data. With the `ocpp` package:
 
 ```python
-from spinev_ble import SpinEvCharger
+from ocpp.v16 import call
 
-charger = SpinEvCharger(device, password, client_class=MyTransport)
+from spinev_ble import OcppTunnelTransport, SpinEvCharger
+
+
+async def data_transfer(vendor_id: str, message_id: str, data: str):
+    result = await charge_point.call(
+        call.DataTransfer(vendor_id=vendor_id, message_id=message_id, data=data)
+    )
+    return result.status, result.data
+
+
+async with SpinEvCharger(OcppTunnelTransport(data_transfer)) as charger:
+    await charger.async_set_current_limit(16)
+    print(await charger.async_get_current_limit())
 ```
 
-It is called as `client_class(device, timeout=..., disconnected_callback=...)`.
+- The charger's JSON parser refuses whitespace between tokens, so the central system must send compact JSON.
+- The streamed history read can't travel through the tunnel and raises `SpinEvUnsupportedError`. The central system sees sessions as OCPP transactions instead.
+- Call `notify_disconnected()` on the transport when the charger's OCPP connection drops, so requests in flight fail at once.
+
+### Your own
+
+Anything that implements `SpinEvTransport` can carry the frames: `is_connected`, `async_connect(on_frame, on_disconnect)`, `async_disconnect()` and `async_send(frame)`. The client serialises its requests, so `async_send` is never called concurrently.
 
 ## Command line
 
@@ -125,7 +170,7 @@ Treat it as a credential: do not commit it, and do not paste it into an issue.
 | Active power, voltage, current | `0x84`, `0x0A`, `0x14` | `async_get_power`, `async_get_voltage`, `async_get_current` |
 | Session energy and duration | `0x35`, `0x59` | `async_get_status` |
 | Lifetime energy and duration | `0x65`, `0x6A` | `async_get_status` |
-| Charging history | `0x68` | `async_get_history` |
+| Charging history (Bluetooth only) | `0x68` | `async_get_history` |
 | Firmware version | `0x52` | `async_get_status` |
 | Active alarms | `0x39` | `async_get_alarms`, `async_get_alarm_defs` |
 | Charging current limit | `0x4F` | `async_get_current_limit`, `async_set_current_limit` |
@@ -166,7 +211,7 @@ Bank 1 bits 10 and 11 are separate faults, the LCD board and the LED board. Bits
 
 **Current limits are model specific.** `async_set_current_limit` guards against anything below 6 A or above 32 A. 32 A is the ceiling of the top single phase unit; three phase and lower rated models differ, so pass `max_amps` to match yours and read the limit back to confirm what the charger accepted.
 
-**One connection at a time.** These chargers accept a single Bluetooth client. While the phone app is connected you cannot connect, and vice versa. Close the app fully, not just to the background.
+**One Bluetooth connection at a time.** These chargers accept a single Bluetooth client. While the phone app is connected you cannot connect, and vice versa. Close the app fully, not just to the background.
 
 **Commands are not instant.** The charger acknowledges immediately, updates its state register after about a second, and starts delivering power about two seconds later. Do not treat a missing state change in the first second as a failure.
 
@@ -195,7 +240,7 @@ uv run prek install
 
 Independent, unofficial project providing Python API bindings for local access. Not affiliated with, endorsed by, or supported by Exicom.
 
-Provided "as is", without warranty of any kind, express or implied, as stated in the Licence below. Use of this library, and of your charger's Bluetooth interface, is at your own risk and subject to your charger's own terms of use and warranty.
+Provided "as is", without warranty of any kind, express or implied, as stated in the Licence below. Use of this library, and of your charger's Bluetooth and OCPP interfaces, is at your own risk and subject to your charger's own terms of use and warranty.
 
 ## Licence
 
