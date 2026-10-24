@@ -13,11 +13,15 @@ import pytest
 from spinev_ble.__main__ import (
     PASSWORD_ENV_VAR,
     _build_parser,
+    _charger_host,
     _default_password,
     _format,
+    _ocpp_url,
     _parse_password,
+    _wanted_ocpp,
 )
 from spinev_ble.const import DEFAULT_HISTORY_COUNT
+from spinev_ble.models import OcppConfig
 
 DUMMY_PASSWORD = 0xABCDEF
 
@@ -62,7 +66,7 @@ class TestParser:
             _build_parser().parse_args([])
 
     @pytest.mark.parametrize(
-        "command", ["scan", "password", "status", "start", "stop", "history"]
+        "command", ["scan", "password", "status", "start", "stop", "history", "ocpp"]
     )
     def test_every_command_parses(self, command: str) -> None:
         args = _build_parser().parse_args([command])
@@ -89,3 +93,65 @@ class TestFormatting:
         assert _format(3.14159, ".2f") == "3.14"
         assert _format(3600) == "3600"
         assert _format("35.24.4.32") == "35.24.4.32"
+
+
+VENDOR_OCPP = OcppConfig(
+    host="dns:ocpp.example.com", port=9000, path="ocpp", charge_point_id="XY2123"
+)
+
+
+class TestOcpp:
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("192.0.2.10", "192.0.2.10"),
+            (" 192.0.2.10 ", "192.0.2.10"),
+            ("2001:db8::1", "2001:db8::1"),
+            ("homeassistant.local", "dns:homeassistant.local"),
+            ("dns:homeassistant.local", "dns:homeassistant.local"),
+        ],
+    )
+    def test_names_are_marked_for_the_charger(self, host: str, expected: str) -> None:
+        assert _charger_host(host) == expected
+
+    def test_only_the_host_given_keeps_the_rest(self) -> None:
+        args = _build_parser().parse_args(["ocpp", "--host", "192.0.2.10"])
+        assert _wanted_ocpp(VENDOR_OCPP, args) == OcppConfig(
+            host="192.0.2.10", port=9000, path="ocpp", charge_point_id="XY2123"
+        )
+
+    def test_every_setting_can_be_given(self) -> None:
+        args = _build_parser().parse_args(
+            [
+                "ocpp",
+                "--host",
+                "192.0.2.10",
+                "--port",
+                "9321",
+                "--path",
+                "central",
+                "--charge-point-id",
+                "garage",
+            ]
+        )
+        assert _wanted_ocpp(VENDOR_OCPP, args) == OcppConfig(
+            host="192.0.2.10", port=9321, path="central", charge_point_id="garage"
+        )
+
+    def test_an_empty_path_gets_the_default(self) -> None:
+        args = _build_parser().parse_args(["ocpp", "--host", "192.0.2.10"])
+        current = OcppConfig(host="", port=9000, path="", charge_point_id="XY2123")
+        assert _wanted_ocpp(current, args).path == "ocpp"
+
+    def test_a_charge_point_id_is_needed(self) -> None:
+        args = _build_parser().parse_args(["ocpp", "--host", "192.0.2.10"])
+        current = OcppConfig(host="", port=9000, path="", charge_point_id="")
+        with pytest.raises(SystemExit, match="--charge-point-id"):
+            _wanted_ocpp(current, args)
+
+    def test_reading_needs_no_host(self) -> None:
+        args = _build_parser().parse_args(["ocpp"])
+        assert args.host is None
+
+    def test_url_shows_the_name_without_its_mark(self) -> None:
+        assert _ocpp_url(VENDOR_OCPP) == "ws://ocpp.example.com:9000/ocpp/XY2123"

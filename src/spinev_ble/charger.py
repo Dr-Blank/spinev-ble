@@ -701,7 +701,8 @@ class SpinEvCharger:
         .. warning::
            A wrong value here leaves the charger unable to reach a central
            system. Read the values back afterwards to confirm it accepted them,
-           and keep the phone app available to restore the originals.
+           and note the originals, read with :meth:`async_get_ocpp_config`,
+           to restore them.
 
         :raises SpinEvValueError: if the host is empty or the port is not a
             valid TCP port.

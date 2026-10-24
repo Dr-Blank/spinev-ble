@@ -10,6 +10,7 @@ import asyncio
 import os
 import re
 import sys
+from ipaddress import ip_address
 
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
@@ -17,9 +18,15 @@ from bleak.backends.device import BLEDevice
 from .charger import SpinEvCharger
 from .const import ADVERTISED_NAME_PATTERN, DEFAULT_HISTORY_COUNT
 from .exceptions import SpinEvError
+from .models import OcppConfig
 from .transports.ble import BleTransport
 
 _NAME_RE = re.compile(ADVERTISED_NAME_PATTERN)
+
+DNS_PREFIX = "dns:"
+"""Marks a host the charger has to resolve, rather than an IP address."""
+
+DEFAULT_OCPP_PATH = "ocpp"
 
 PASSWORD_ENV_VAR = "SPINEV_BLE_PASSWORD"
 """Read instead of ``--password`` so the credential stays out of shell history
@@ -152,6 +159,64 @@ async def _cmd_stop(args: argparse.Namespace) -> None:
     await _run_control(args, start=False)
 
 
+def _charger_host(host: str) -> str:
+    """Return ``host`` the way the charger stores it: an IP as is, a name marked."""
+    host = host.strip()
+    try:
+        ip_address(host)
+    except ValueError:
+        return host if host.startswith(DNS_PREFIX) else f"{DNS_PREFIX}{host}"
+    return host
+
+
+def _ocpp_url(config: OcppConfig) -> str:
+    """Return the address the charger connects to for OCPP."""
+    host = config.host.removeprefix(DNS_PREFIX)
+    path = f"/{config.path.strip('/')}" if config.path.strip("/") else ""
+    return f"ws://{host}:{config.port}{path}/{config.charge_point_id}"
+
+
+def _print_ocpp(config: OcppConfig) -> None:
+    print(f"host             {config.host or 'not set'}")
+    print(f"port             {config.port}")
+    print(f"path             {config.path or 'not set'}")
+    print(f"charge point id  {config.charge_point_id or 'not set'}")
+    if config.host:
+        print(f"url              {_ocpp_url(config)}")
+
+
+def _wanted_ocpp(current: OcppConfig, args: argparse.Namespace) -> OcppConfig:
+    """Return the settings to write: what was asked for, the rest as they are."""
+    charge_point_id = args.charge_point_id or current.charge_point_id
+    if not charge_point_id:
+        raise SystemExit(
+            "the charger has no charge point id, pass one with --charge-point-id"
+        )
+    return OcppConfig(
+        host=_charger_host(args.host),
+        port=args.port if args.port is not None else current.port,
+        path=args.path if args.path is not None else current.path or DEFAULT_OCPP_PATH,
+        charge_point_id=charge_point_id,
+    )
+
+
+async def _cmd_ocpp(args: argparse.Namespace) -> None:
+    async with await _open(args) as charger:
+        current = await charger.async_get_ocpp_config()
+        if args.host is None:
+            _print_ocpp(current)
+            return
+        wanted = _wanted_ocpp(current, args)
+        if wanted == current:
+            print("the charger already connects there, nothing to change")
+            return
+        print("current settings, note them to put them back later:")
+        _print_ocpp(current)
+        await charger.async_set_ocpp_config(wanted)
+    print("\nnew settings written, the charger restarts to apply them:")
+    _print_ocpp(wanted)
+
+
 def _parse_password(value: str) -> int:
     """Accept a password as decimal or as ``0x`` hex."""
     try:
@@ -191,6 +256,20 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stop", help="stop charging")
     history = sub.add_parser("history", help="read stored charging sessions")
     history.add_argument("--count", type=int, default=DEFAULT_HISTORY_COUNT)
+    ocpp = sub.add_parser(
+        "ocpp",
+        help="read the OCPP server the charger connects to, or point it elsewhere",
+        description="Without --host, print where the charger connects for OCPP. "
+        "With --host, point it there, keeping any setting not given, and "
+        "restart it. This ends a charging session in progress, and a charger "
+        "pointed away from the vendor's server stops using the vendor cloud.",
+    )
+    ocpp.add_argument("--host", help="IP address or name of the OCPP server")
+    ocpp.add_argument("--port", type=int, help="TCP port of the OCPP server")
+    ocpp.add_argument("--path", help=f"WebSocket path, {DEFAULT_OCPP_PATH!r} if unset")
+    ocpp.add_argument(
+        "--charge-point-id", help="id the charger connects as, kept if omitted"
+    )
     return parser
 
 
@@ -204,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         "history": _cmd_history,
         "start": _cmd_start,
         "stop": _cmd_stop,
+        "ocpp": _cmd_ocpp,
     }
     try:
         asyncio.run(handlers[args.command](args))

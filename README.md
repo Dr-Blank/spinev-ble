@@ -136,9 +136,13 @@ spinev-ble status                # live telemetry
 spinev-ble history               # stored charging sessions
 spinev-ble start                 # start charging
 spinev-ble stop                  # stop charging
+spinev-ble ocpp                  # where the charger connects for OCPP
+spinev-ble ocpp --host 192.0.2.10 --port 9321 --path ocpp   # point it elsewhere
 ```
 
 Or `python -m spinev_ble ...` if you prefer.
+
+`ocpp --host` keeps every setting you do not pass, prints the current ones first so you can put them back, and restarts the charger. A charger pointed away from the vendor's server stops using the vendor cloud. To use the [Home Assistant integration](https://github.com/Dr-Blank/spinev-ha) over OCPP without a Bluetooth proxy, run it once from any computer with Bluetooth near the charger, with the address of Home Assistant, port `9321` and path `ocpp`.
 
 Pass the password through the environment rather than `--password`, so it stays out of your shell history and out of the process list:
 
