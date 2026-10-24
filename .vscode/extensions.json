@@ -4,7 +4,7 @@
     "editorconfig.editorconfig",
     "ms-python.python",
     "ms-python.vscode-pylance",
-    // The three gates that also run in prek and CI.
+    // The gates that also run in prek and CI.
     "charliermarsh.ruff",
     "ms-python.mypy-type-checker",
     "ms-python.pylint",

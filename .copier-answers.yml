@@ -1,0 +1,16 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v1.4.0
+_src_path: https://github.com/Dr-Blank/ha-integration-ci
+description: local bluetooth le control for exicom spin ev chargers
+license: MIT
+mypy_untyped_modules:
+- bleak_retry_connector.*
+package: spinev_ble
+project_type: library
+pylint: true
+python_versions:
+- '3.11'
+- '3.12'
+- '3.13'
+- '3.14'
+repo_name: spinev-ble
