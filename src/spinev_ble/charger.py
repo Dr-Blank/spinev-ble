@@ -348,6 +348,10 @@ class SpinEvCharger:
                 raise SpinEvConnectionError(f"write failed: {err}") from err
             finally:
                 self._waiters.pop(register, None)
+                if future.done() and not future.cancelled():
+                    # A drop can fail the waiter after the send has already
+                    # failed with its own error; mark the drop as seen.
+                    future.exception()
             return payload
 
     async def _write_frames(self, frames: list[bytes]) -> None:

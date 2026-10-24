@@ -227,6 +227,28 @@ class TestConnection:
         gc.collect()
         assert unhandled == []
 
+    async def test_send_that_fails_after_a_drop_leaves_no_unseen_error(
+        self, transport: ScriptedTransport
+    ) -> None:
+        """A drop reported while the send itself fails must not warn later."""
+
+        async def drops_then_fails(frame: bytes) -> None:
+            transport.drop()
+            raise OSError("charge point disconnected")
+
+        transport.async_send = drops_then_fails  # type: ignore[method-assign]
+        loop = asyncio.get_running_loop()
+        unhandled: list[dict[str, object]] = []
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+        charger = make_charger(transport, timeout=30.0)
+        async with charger:
+            with pytest.raises(SpinEvConnectionError, match="write failed"):
+                await charger.async_get_power()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        gc.collect()
+        assert unhandled == []
+
     async def test_dropped_link_fails_fast_instead_of_waiting(
         self, transport: ScriptedTransport
     ) -> None:
