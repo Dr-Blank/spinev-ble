@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import logging
 import subprocess
 import sys
 from datetime import datetime
@@ -196,6 +197,69 @@ class TestConnection:
             with pytest.raises(SpinEvTimeoutError) as excinfo:
                 await charger.async_get_power()
         assert str(excinfo.value) == "no reply for register 0x84"
+
+    async def test_a_read_logs_the_register_and_length_but_never_the_value(
+        self, transport: ScriptedTransport, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        transport.replies = {
+            Register.PASSWORD: reply(Register.PASSWORD, bytes.fromhex("00abcdef"))
+        }
+        charger = make_charger(transport, password=None)
+        with caplog.at_level(logging.DEBUG, logger="spinev_ble.charger"):
+            async with charger:
+                assert await charger.async_get_password() == DUMMY_PASSWORD
+
+        assert "request to PASSWORD (0x32), flag 0x00, answered with" in caplog.text
+        assert "abcdef" not in caplog.text.lower()
+        assert str(DUMMY_PASSWORD) not in caplog.text
+
+    async def test_a_register_without_a_name_is_logged_by_id(
+        self, transport: ScriptedTransport, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        transport.replies = {0xF0: reply(0xF0, bytes(4))}
+        charger = make_charger(transport)
+        with caplog.at_level(logging.DEBUG, logger="spinev_ble.charger"):
+            async with charger:
+                await charger.async_read_raw(0xF0)
+
+        assert "request to 0xF0, flag 0x00, answered with" in caplog.text
+
+    async def test_a_failed_request_logs_the_register_and_transport(
+        self, transport: ScriptedTransport, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        transport.replies = {}
+        charger = make_charger(transport, timeout=0.05)
+        with caplog.at_level(logging.DEBUG, logger="spinev_ble.charger"):
+            async with charger:
+                with pytest.raises(SpinEvTimeoutError):
+                    await charger.async_get_power()
+
+        assert "request to POWER (0x84), flag 0x00, failed after" in caplog.text
+        assert "over ScriptedTransport: no reply for register 0x84" in caplog.text
+
+    async def test_a_write_logs_the_register_and_length_but_never_the_value(
+        self, transport: ScriptedTransport, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        charger = make_charger(transport)
+        with caplog.at_level(logging.DEBUG, logger="spinev_ble.charger"):
+            async with charger:
+                await charger.async_set_wifi("example-ssid", "example-secret")
+
+        assert "bytes to WIFI_PASSWORD (0x61)" in caplog.text
+        assert "example-secret" not in caplog.text
+        assert b"example-secret".hex() not in caplog.text
+
+    async def test_a_failed_write_logs_the_register_and_transport(
+        self, transport: ScriptedTransport, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        transport.send_error = OSError("link down")
+        charger = make_charger(transport)
+        with caplog.at_level(logging.DEBUG, logger="spinev_ble.charger"):
+            async with charger:
+                with pytest.raises(SpinEvConnectionError):
+                    await charger.async_set_wifi("example-ssid", "example-secret")
+
+        assert "over ScriptedTransport: write failed: link down" in caplog.text
 
     def test_each_bundled_transport_names_its_own_likely_cause(self) -> None:
         assert "phone app" in BleTransport.timeout_hint

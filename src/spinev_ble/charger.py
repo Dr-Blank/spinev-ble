@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from datetime import datetime
 from types import TracebackType
@@ -98,6 +99,14 @@ _STATUS_READS: tuple[tuple[str, Register, Callable[[bytes], Any]], ...] = (
     ("lifetime_seconds", Register.LIFETIME_SECONDS, decode_uint),
     ("firmware_version", Register.FIRMWARE_VERSION, decode_firmware_version),
 )
+
+
+def _describe_register(register: int) -> str:
+    """Name a register for a log message, by name where it has one."""
+    try:
+        return f"{Register(register).name} (0x{register:02X})"
+    except ValueError:
+        return f"0x{register:02X}"
 
 
 def _value_bytes(payload: bytes, label: str) -> bytes:
@@ -250,6 +259,30 @@ class SpinEvCharger:
         return self._transport
 
     async def _send(self, transport: SpinEvTransport, frame: bytes) -> None:
+        """Send one frame that waits for no reply, logging how it went.
+
+        Logs the register and length only, because frames can carry credentials.
+        """
+        started = time.monotonic()
+        try:
+            await self._send_frame(transport, frame)
+        except SpinEvError as err:
+            _LOGGER.debug(
+                "send to %s failed after %.3f s over %s: %s",
+                _describe_register(frame[2]),
+                time.monotonic() - started,
+                type(transport).__name__,
+                err,
+            )
+            raise
+        _LOGGER.debug(
+            "sent %d bytes to %s in %.3f s",
+            len(frame),
+            _describe_register(frame[2]),
+            time.monotonic() - started,
+        )
+
+    async def _send_frame(self, transport: SpinEvTransport, frame: bytes) -> None:
         """Hand one frame to the transport, reporting failures as package errors."""
         loop = asyncio.get_running_loop()
         abort: asyncio.Future[None] = loop.create_future()
@@ -319,6 +352,34 @@ class SpinEvCharger:
         _LOGGER.debug("ignoring unexpected payload of %d bytes", len(payload))
 
     async def _request(self, frame: bytes, register: int) -> bytes:
+        """Exchange a frame for its reply, logging how it went.
+
+        Logs the register, flag and length only, because replies can carry
+        credentials.
+        """
+        started = time.monotonic()
+        try:
+            payload = await self._exchange(frame, register)
+        except SpinEvError as err:
+            _LOGGER.debug(
+                "request to %s, flag 0x%02X, failed after %.3f s over %s: %s",
+                _describe_register(register),
+                frame[3],
+                time.monotonic() - started,
+                type(self._transport).__name__,
+                err,
+            )
+            raise
+        _LOGGER.debug(
+            "request to %s, flag 0x%02X, answered with %d bytes in %.3f s",
+            _describe_register(register),
+            frame[3],
+            len(payload),
+            time.monotonic() - started,
+        )
+        return payload
+
+    async def _exchange(self, frame: bytes, register: int) -> bytes:
         """Send a frame and wait for the matching reply.
 
         Replies are matched on the register byte and the flag byte the
