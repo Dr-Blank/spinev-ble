@@ -369,6 +369,10 @@ class TestChargerStateCoverage:
         assert not ChargerState.UNAVAILABLE.has_vehicle
         assert not ChargerState.BOOTING.is_charging
 
+    def test_a_fault_cannot_tell_whether_a_vehicle_is_present(self) -> None:
+        # A protection alarm trips with or without a vehicle.
+        assert ChargerState.FAULT.has_vehicle is None
+
 
 class TestPublicExports:
     """The package root must actually expose what its docs point callers at."""

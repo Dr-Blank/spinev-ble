@@ -207,12 +207,16 @@ class ChargerState(IntEnum):
         return self in (ChargerState.EVSE_SUSPENDED, ChargerState.EV_SUSPENDED)
 
     @property
-    def has_vehicle(self) -> bool:
-        """True when a vehicle is connected.
+    def has_vehicle(self) -> bool | None:
+        """Whether a vehicle is connected, ``None`` if this state cannot tell.
 
-        False whenever the charger is not in a position to say, which covers
-        :attr:`BOOTING` and :attr:`UNAVAILABLE` as well as :attr:`AVAILABLE`.
+        :attr:`FAULT` gives ``None``: a protection alarm trips with or without a
+        vehicle, so the state says nothing about the plug. Keep the last known
+        answer through it. :attr:`BOOTING` and :attr:`UNAVAILABLE` give ``False``,
+        as does :attr:`AVAILABLE`.
         """
+        if self is ChargerState.FAULT:
+            return None
         return self not in (
             ChargerState.AVAILABLE,
             ChargerState.BOOTING,
